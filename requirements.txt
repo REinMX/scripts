@@ -1,0 +1,8 @@
+numpy>=1.22
+pandas>=1.4
+matplotlib>=3.5
+PyYAML>=6.0
+# optional but recommended for LHS and exact norm.ppf
+scipy>=1.8
+# Windows + licensed MBAL only:
+# pywin32>=305

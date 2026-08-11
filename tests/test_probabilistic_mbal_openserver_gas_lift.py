@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
 
+import mbal_core as core
 import probabilistic_mbal_openserver_gas_lift as mbal
 
 
@@ -33,8 +36,14 @@ def tank(
     )
 
 
+def name_cfg(**kwargs) -> mbal.Config:
+    """Config with name-based tags (gas-lift workflow defaults)."""
+    base = mbal.default_config(gas_lift=True)
+    return replace(base, **kwargs) if kwargs else base
+
+
 def test_gas_lift_sweep_reuses_each_probabilistic_realization() -> None:
-    cfg = mbal.Config(
+    cfg = name_cfg(
         tanks=(
             tank("bottom", "BOTTOM_TANK", 0, uniform(10.0, 20.0)),
             tank("top", "TOP_TANK", 1, uniform(30.0, 50.0)),
@@ -66,7 +75,7 @@ class RecordingServer:
 
 
 def test_apply_realization_uses_verified_name_based_input_tags() -> None:
-    cfg = mbal.Config(
+    cfg = name_cfg(
         tanks=(
             tank("bottom", "BOTTOM_TANK", 0, fixed(20.0), fixed(100.0)),
             tank("top", "TOP_TANK", 1, fixed(40.0)),
@@ -96,14 +105,14 @@ def test_apply_realization_uses_verified_name_based_input_tags() -> None:
 
 
 def test_negative_gas_lift_value_is_rejected() -> None:
-    cfg = mbal.Config(gas_lift_values=(0.0, -0.5))
+    cfg = name_cfg(gas_lift_values=(0.0, -0.5))
 
     with pytest.raises(ValueError, match="gas-lift sensitivity values"):
         mbal.validate_config(cfg)
 
 
 def test_gas_lift_summary_reports_field_oil_percentiles(tmp_path) -> None:
-    cfg = mbal.Config(out_dir=str(tmp_path), gas_lift_values=(0.0, 1.0))
+    cfg = name_cfg(out_dir=str(tmp_path), gas_lift_values=(0.0, 1.0))
     results = pd.DataFrame(
         {
             "gas_lift_rate": [0.0, 0.0, 1.0, 1.0],
@@ -112,7 +121,7 @@ def test_gas_lift_summary_reports_field_oil_percentiles(tmp_path) -> None:
         }
     )
 
-    mbal._summarize_gas_lift(results, cfg)
+    core._summarize_gas_lift(results, cfg)
 
     summary = pd.read_csv(tmp_path / "gas_lift_sensitivity.csv")
     assert summary["gas_lift_rate"].tolist() == [0.0, 1.0]
@@ -122,7 +131,7 @@ def test_gas_lift_summary_reports_field_oil_percentiles(tmp_path) -> None:
 
 
 def test_main_summary_does_not_pool_results_across_gas_lift_rates(tmp_path) -> None:
-    cfg = mbal.Config(out_dir=str(tmp_path), gas_lift_values=(0.0, 1.0))
+    cfg = name_cfg(out_dir=str(tmp_path), gas_lift_values=(0.0, 1.0))
     results = pd.DataFrame(
         {
             "realization": [0, 1, 2, 3],
@@ -149,3 +158,16 @@ def test_main_summary_does_not_pool_results_across_gas_lift_rates(tmp_path) -> N
         "REPLACE_WITH_TOP_TANK_NAME STOIIP [MMstb]",
         "Field STOIIP [MMstb]",
     ]
+
+
+def test_yaml_gas_lift_config(tmp_path) -> None:
+    path = tmp_path / "gl.yaml"
+    mbal.main(["--write-example-config", str(path)])
+    cfg = mbal.load_config_yaml(path, base=mbal.default_config(gas_lift=True))
+    mbal.validate_config(cfg)
+    assert cfg.tag_mode == "name"
+    assert cfg.gas_lift_values
+    samples = mbal.build_sample_table(
+        replace(cfg, n_realizations=4, gas_lift_values=(0.0, 1.0))
+    )
+    assert len(samples) == 8

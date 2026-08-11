@@ -1,3 +1,20 @@
 __pycache__/
 *.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+
+# Run outputs
 mbal_mc_output/
+mbal_gas_lift_output/
+**/mbal_run.log
+**/samples_dry_run.csv
+**/summary_percentiles.csv
+**/run_metadata.csv
+**/gas_lift_sensitivity.csv
+**/*.png

@@ -1,0 +1,55 @@
+# Example config for probabilistic_mbal_openserver.py
+#   python probabilistic_mbal_openserver.py --config example_config.yaml --dry-run
+
+mbal_file: C:\Work\Models\two_tank_model.mbi
+tag_mode: index
+n_realizations: 200
+seed: 42
+sampling: lhs
+out_dir: mbal_mc_output
+out_csv: mbal_mc_results.csv
+validate_tags: true
+reconnect_every: 0
+log_level: INFO
+stop_on_error: false
+
+unit_stoiip: MMstb
+unit_press: psig
+unit_cum: MMstb
+
+# Extra statistical percentiles; 5 and 95 map to O&G labels P95 and P5.
+extra_percentiles: [5.0, 95.0]
+
+tanks:
+  - key: A
+    name: Tank A
+    index: 0
+    stoiip:
+      kind: lognormal
+      p90: 20.0
+      p10: 70.0
+    # aquifer_multiplier:
+    #   kind: uniform
+    #   low: 0.5
+    #   high: 2.0
+
+  - key: B
+    name: Tank B
+    index: 1
+    stoiip:
+      kind: triangular
+      low: 15.0
+      mode: 45.0
+      high: 90.0
+
+# Copy exact strings from MBAL OpenServer variable browser for your IPM version.
+tags:
+  tank_stoiip: 'MBAL.MB[0].TANK[{i}].OIIP("{u}")'
+  aquifer_mult: MBAL.MB[0].TANK[{i}].AQUIFER.VOLRATIO
+  cmd_open: 'MBAL.OPENFILE("{path}")'
+  cmd_run_pred: MBAL.MB[0].PREDICTION.CALCULATE
+  cmd_close: MBAL.SHUTDOWN
+  res_nsteps: MBAL.MB[0].PREDICTION.RESULTS[{i}].COUNT
+  res_cumoil: 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMOIL("{u}")'
+  res_pressure: 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].PRESSURE("{u}")'
+  res_cumwat: 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMWATER("{u}")'

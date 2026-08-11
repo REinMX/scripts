@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import mbal_core as core
 import probabilistic_mbal_openserver as mbal
 
 
@@ -205,3 +206,75 @@ def test_invalid_distribution_parameters_are_rejected() -> None:
 
     with pytest.raises(ValueError, match="p90 must be lower than p10"):
         mbal.build_sample_table(cfg)
+
+
+def test_percentiles_include_std_and_p95_p5() -> None:
+    stats = mbal.percentiles(np.array([1.0, 2.0, 3.0, 4.0, 5.0]))
+    assert set(stats) >= {"P90", "P50", "P10", "mean", "std", "P95", "P5"}
+    assert stats["P50"] == pytest.approx(3.0)
+    assert stats["std"] == pytest.approx(np.std([1, 2, 3, 4, 5]))
+
+
+def test_resume_retries_failed_but_skips_ok(tmp_path) -> None:
+    cfg = mbal.Config(
+        tanks=(tank("A", 0, fixed(10.0)), tank("B", 1, fixed(20.0))),
+        n_realizations=3,
+        seed=1,
+        out_dir=str(tmp_path),
+        out_csv="results.csv",
+    )
+    samples = mbal.build_sample_table(cfg)
+    csv_path = tmp_path / "results.csv"
+
+    # realization 0 ok, 1 failed, 2 missing
+    rows = []
+    for _, row in samples.iterrows():
+        rid = int(row["realization"])
+        if rid == 2:
+            continue
+        record = mbal.new_result_record(row, cfg)
+        if rid == 0:
+            record["status"] = "ok"
+            record["np_A"] = 1.0
+            record["np_B"] = 2.0
+            record["np_total"] = 3.0
+            record["rf_A"] = 0.1
+            record["rf_B"] = 0.1
+            record["rf_total"] = 0.1
+        else:
+            record["status"] = "failed: boom"
+        rows.append(record)
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+    completed = core._completed_realizations(str(csv_path), samples, cfg)
+    assert completed == {0}
+
+
+def test_yaml_config_roundtrip(tmp_path) -> None:
+    path = tmp_path / "cfg.yaml"
+    mbal.main(["--write-example-config", str(path)])
+    cfg = mbal.load_config_yaml(path)
+    mbal.validate_config(cfg)
+    assert len(cfg.tanks) == 2
+    assert cfg.tag_mode == "index"
+    samples = mbal.build_sample_table(
+        mbal.Config(
+            tanks=cfg.tanks,
+            n_realizations=5,
+            seed=cfg.seed,
+            sampling=cfg.sampling,
+            tags=cfg.tags,
+            tag_mode=cfg.tag_mode,
+        )
+    )
+    assert len(samples) == 5
+
+
+def test_dry_run_cli(tmp_path) -> None:
+    out = tmp_path / "out"
+    code = mbal.main(
+        ["--dry-run", "--n", "8", "--seed", "2", "--out-dir", str(out)]
+    )
+    assert code == 0
+    assert (out / "samples_dry_run.csv").exists()
+    assert (out / "summary_percentiles.csv").exists()
