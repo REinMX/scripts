@@ -69,9 +69,41 @@ The OpenServer tags in `TAGS` are placeholders because tag strings vary between
 IPM versions. Copy each exact variable name from MBAL's OpenServer variable
 browser before a licensed run.
 
+## Model-specific gas-lift sensitivity variant
+
+`probabilistic_mbal_openserver_gas_lift.py` is a separate model-specific variant
+for an MBAL V16.5 workflow. Asset and object names are intentionally anonymized.
+It keeps independent per-tank STOIIP sampling and adds:
+
+- name-based tank input tags with obvious `REPLACE_WITH_...` placeholders;
+- optional independent `AQUIFVOLUME` distributions per tank;
+- a placeholder prediction-well `GASLIFTRATE` input;
+- a deterministic gas-lift sweep paired across every probabilistic realization;
+- `gas_lift_sensitivity.csv` and `gas_lift_sensitivity.png` based on field
+  cumulative oil P90/P50/P10 and mean.
+
+For a gas-lift sweep, `summary_percentiles.csv` reports the geological inputs
+once per base realization and deliberately excludes prediction results pooled
+across lift rates. Use `gas_lift_sensitivity.csv` for the canonical per-rate
+field-oil comparison.
+
+```bash
+# 200 geological samples × 4 lift settings = 800 dry-run rows
+python probabilistic_mbal_openserver_gas_lift.py \
+    --dry-run \
+    --n 200 \
+    --gas-lift-values 0,0.5,1.0,1.5
+```
+
+Before a licensed run, replace `REPLACE_WITH_BOTTOM_TANK_NAME`,
+`REPLACE_WITH_TOP_TANK_NAME`, and `REPLACE_WITH_GAS_LIFT_WELL_NAME` with the
+exact object names copied from your MBAL OpenServer dialogs. The three input-tag
+templates came from an MBAL V16.5 model; prediction commands and result tags
+remain placeholders until verified against the target MBAL/IPM installation.
+
 ### Verify
 
 ```bash
 python -m pytest -q
-ruff check probabilistic_mbal_openserver.py tests/
+ruff check *.py tests/
 ```
