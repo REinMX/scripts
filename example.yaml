@@ -1,0 +1,107 @@
+# Single config for this well. Always three tanks.
+#   python mbal.py --config example.yaml --dry-run --n 200
+#   python mbal.py --config example.yaml --n 200
+#
+# Case 1 volume only: keep the inj/lift lists empty (or use --dry-run and
+#   ignore the extra rows).
+# Case 2 producer: water_inj_* and gas_lift_values empty.
+# Case 3 gas lift: fill gas_lift_well + gas_lift_values.
+# Case 4 water injector: fill water_inj_well + rate/bhp lists.
+#
+# OpenServer: Ctrl+Right-click in MBAL and paste exact strings into tags.
+# Petex IPM OpenServer User Manual (Jan 2011) MBAL PREDWELL / PREDINP.
+
+mbal_file: C:\Work\Models\two_tank_model.mbi
+tag_mode: name
+n_realizations: 200
+seed: 42
+sampling: lhs
+out_dir: mbal_output
+out_csv: mbal_results.csv
+validate_tags: true
+log_level: INFO
+
+unit_stoiip: MSm3
+unit_press: bara
+unit_cum: MSm3
+
+volume_model:
+  kind: connected_volume
+  official_as: none
+  field_scale:
+    kind: lognormal
+    p90: 0.88
+    p10: 1.10
+  # Correlation between tanks that share a connectivity group (below).
+  # 0 = each sand connects or not on its own coin flip. 1 = one barrier
+  # decides them together. Each tank keeps its own p_connected either way;
+  # only the joint case changes. 0.8 says "very likely the same fault".
+  # OWN THIS NUMBER - it is a geological statement, not a tuning knob.
+  connectivity_correlation: 0.8
+
+# Optional. Empty = no lift sweep.
+gas_lift_well: REPLACE_WITH_GAS_LIFT_WELL_NAME
+gas_lift_prediction_index: 1
+gas_lift_values: []
+
+# Optional. Empty = no injection sweep.
+water_inj_well: REPLACE_WITH_WATER_INJ_WELL_NAME
+water_inj_prediction_index: 1
+water_inj_control: rate_with_bhp_limit
+water_inj_rate_values: [0.0, 300.0, 600.0]
+water_inj_bhp_values: [250.0, 300.0]
+
+tanks:
+  - key: A
+    name: REPLACE_WITH_TANK_A_NAME
+    index: 0
+    official_stoiip: 4.5
+    role: base
+    connectivity:
+      kind: two_section
+      p_connected: 0.30
+      isolated_fraction: 0.50
+      group: base_sands        # same barrier as B - see connectivity_correlation
+      residual: {kind: lognormal, p90: 0.88, p10: 1.10}
+  - key: B
+    name: REPLACE_WITH_TANK_B_NAME
+    index: 1
+    official_stoiip: 3.0
+    role: base
+    connectivity:
+      kind: two_section
+      p_connected: 0.35
+      isolated_fraction: 0.50
+      group: base_sands        # same barrier as A - see connectivity_correlation
+      residual: {kind: lognormal, p90: 0.70, p10: 1.25}
+  - key: C
+    name: REPLACE_WITH_DEEPER_SAND_NAME
+    index: 2
+    official_stoiip: 6.5
+    role: upside
+    in_model: false
+    connectivity:
+      kind: optional
+      p_connected: 0.25
+      isolated_fraction: 0.0
+      residual: {kind: lognormal, p90: 0.60, p10: 1.40}
+
+tags:
+  tank_stoiip: MBAL.MB[0].TANK[{tank}].OOIP
+  aquifer_volume: MBAL.MB[0].TANK[{tank}].AQUIFVOLUME
+  gas_lift_rate: MBAL.MB[0].PREDWELL[{well}][{p}].GASLIFTRATE
+  water_inj_rate: MBAL.MB[0].PREDWELL[{well}][{p}].MAXRATE
+  water_inj_min_rate: MBAL.MB[0].PREDWELL[{well}][{p}].MINRATE
+  water_inj_bhp: MBAL.MB[0].PREDWELL[{well}].CONSTFBHP
+  water_inj_max_fbhp: MBAL.MB[0].PREDWELL[{well}].MAXFBHP
+  water_inj_perform: MBAL.MB[0].PREDWELL[{well}].PERFORMTYPE
+  pred_watinj: MBAL.MB[0].PREDINP.WATINJ
+  pred_max_inj_wat: MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAXINJWATRATE
+  cmd_open: 'MBAL.OPENFILE("{path}")'
+  cmd_run_pred: MBAL.MB[0].PREDICTION.CALCULATE
+  cmd_close: MBAL.SHUTDOWN
+  res_nsteps: MBAL.MB[0].PREDICTION.RESULTS[{i}].COUNT
+  res_cumoil: 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMOIL("{u}")'
+  res_pressure: 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].PRESSURE("{u}")'
+  res_cumwat: 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMWATER("{u}")'
+  res_cumwatinj: 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMWATINJ("{u}")'

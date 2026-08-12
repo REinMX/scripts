@@ -1,13 +1,21 @@
 """
 Shared core for probabilistic MBAL via Petroleum Experts OpenServer.
 
-Used by the thin entry scripts:
-  - probabilistic_mbal_openserver.py
-  - probabilistic_mbal_openserver_gas_lift.py
+Used by the single CLI: mbal.py
 
-Supports independent per-tank STOIIP sampling (MC/LHS), optional aquifer
-parameters, optional gas-lift sensitivity sweeps, YAML config, resume-safe
-CSV output, tag validation, logging, and P90/P50/P10 summaries with plots.
+Supports:
+  - independent per-tank STOIIP, FMU/ERT residual multipliers, or
+    connected-volume (connectivity + optional upside tank)
+  - optional aquifer parameters
+  - deterministic operational sweeps (gas lift, water-injection rate, BHP)
+  - YAML config, resume-safe CSV, tag validation, P90/P50/P10 summaries
+
+This is a dynamic material-balance model. Tank volumes are inputs to MBAL,
+not a geological realization.
+
+OpenServer well/injector names below follow Petroleum Experts, *IPM OpenServer
+User Manual* (January 2011), Part 5 MBAL: PREDINP / PREDWELL. Copy the exact
+strings from MBAL's browser for your IPM version before a licensed run.
 """
 
 from __future__ import annotations
@@ -29,6 +37,17 @@ import pandas as pd
 
 LOG = logging.getLogger("mbal")
 
+# Keys already warned about, so a per-realization problem is reported once.
+_WARNED_ONCE: set[str] = set()
+
+
+def _warn_once(key: str, message: str, *args: object) -> None:
+    """Log a warning the first time this key is seen in the process."""
+    if key in _WARNED_ONCE:
+        return
+    _WARNED_ONCE.add(key)
+    LOG.warning(message, *args)
+
 # -----------------------------------------------------------------------------
 # 1. CONFIGURATION
 # -----------------------------------------------------------------------------
@@ -36,6 +55,20 @@ LOG = logging.getLogger("mbal")
 DistributionKind = Literal["fixed", "uniform", "triangular", "lognormal"]
 SamplingMethod = Literal["lhs", "mc"]
 TagMode = Literal["index", "name"]
+VolumeModelKind = Literal["independent", "fmu_residual", "connected_volume"]
+OfficialAnchor = Literal["none", "p50", "p40", "p30"]
+WaterInjControl = Literal["rate", "bhp", "rate_with_bhp_limit"]
+TankRole = Literal["base", "upside"]
+ConnectivityKind = Literal["two_section", "optional"]
+
+# O&G percentile label -> statistical percentile (low tail = P90).
+_OG_TO_STAT: dict[str, float] = {
+    "p90": 10.0,
+    "p50": 50.0,
+    "p40": 60.0,
+    "p30": 70.0,
+    "p10": 90.0,
+}
 
 
 @dataclass(frozen=True)
@@ -67,15 +100,116 @@ class Distribution:
 
 
 @dataclass(frozen=True)
+class Connectivity:
+    """How much of the official tank volume the well actually sees.
+
+    two_section
+        Official assumes two sand sections communicate. If they do not,
+        the well sees isolated_fraction of official (default 0.5).
+
+    optional
+        The tank is either fully on the well or not at all (upside sand).
+        isolated_fraction should be 0.
+
+    group
+        Name of the shared geological risk that decides connectivity. Tanks
+        isolated by the *same* fault or shale should share a group, so the
+        draws are correlated instead of diversifying each other away. See
+        volume_model.connectivity_correlation. Tanks with no group (or a
+        group of their own) stay independent.
+    """
+
+    kind: str
+    p_connected: float
+    isolated_fraction: float = 0.0
+    residual: Distribution | None = None
+    group: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "kind": self.kind,
+            "p_connected": self.p_connected,
+            "isolated_fraction": self.isolated_fraction,
+        }
+        if self.group is not None:
+            data["group"] = self.group
+        if self.residual is not None:
+            data["residual"] = self.residual.to_dict()
+        return data
+
+
+@dataclass(frozen=True)
+class VolumeModel:
+    """Oil-in-place uncertainty model for a dynamic (MBAL) tank study.
+
+    independent
+        Each tank has its own STOIIP distribution. Field total is a sum.
+        Optimistic on the field low-case when tanks share Bo / mapping
+        error (false diversification).
+
+    fmu_residual
+        Official * shared field_scale * tank residual. Use when
+        connectivity is already decided and only residual volume remains.
+
+    connected_volume
+        Official numbers are mapped *connected-case* volumes, not the
+        mean. Discrete connectivity decides how much of that volume the
+        well sees; a residual multiplier sits on top:
+
+            STOIIP_i = official_i × connect_frac_i × residual_i
+                       × (field_scale if tank.role == base)
+
+        connect_frac is 1 or isolated_fraction (two_section), or 1 or 0
+        (optional). Upside tanks are excluded from the base sum.
+        official_as is ignored — the mixture already puts official high.
+
+    connectivity_correlation
+        Correlation between the connectivity draws of tanks that share a
+        connectivity.group, via a one-factor Gaussian copula. 0 keeps the
+        draws independent; 1 means one barrier decides them together, so
+        P(all connected) = min(p_connected) rather than the product. Each
+        tank's own p_connected is preserved exactly at every value.
+        Independent connectivity is false diversification in the same way
+        volume_model.kind 'independent' is: it lifts the field low case.
+    """
+
+    kind: str = "independent"
+    official_as: str = "none"
+    field_scale: Distribution | None = None
+    residual: Distribution | None = None
+    max_multiplier: float | None = None
+    connectivity_correlation: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "kind": self.kind,
+            "official_as": self.official_as,
+            "connectivity_correlation": self.connectivity_correlation,
+        }
+        if self.field_scale is not None:
+            data["field_scale"] = self.field_scale.to_dict()
+        if self.residual is not None:
+            data["residual"] = self.residual.to_dict()
+        if self.max_multiplier is not None:
+            data["max_multiplier"] = self.max_multiplier
+        return data
+
+
+@dataclass(frozen=True)
 class TankConfig:
-    """Configuration for one independently sampled MBAL tank."""
+    """Configuration for one MBAL tank."""
 
     key: str
     name: str
     index: int
-    stoiip: Distribution
+    stoiip: Distribution | None = None
     aquifer_multiplier: Distribution | None = None
     aquifer_volume: Distribution | None = None
+    official_stoiip: float | None = None
+    residual: Distribution | None = None
+    role: str = "base"
+    in_model: bool = True
+    connectivity: Connectivity | None = None
 
 
 def _default_index_tanks() -> tuple[TankConfig, ...]:
@@ -96,29 +230,95 @@ def _default_index_tanks() -> tuple[TankConfig, ...]:
     )
 
 
-def _default_name_tanks() -> tuple[TankConfig, ...]:
-    """Example priors for name-based OpenServer tags (gas-lift workflow)."""
+def _default_exploration_tanks() -> tuple[TankConfig, ...]:
+    """Working mapped volumes (MSm3). Placeholders — update when official changes.
+
+    A: two sand sections; official 4.5 assumes they communicate.
+    B: smaller sand; official 3.0 plus OWC and the same connectivity issue.
+    C: deeper sand ~6.5, optional upside, not in the base case. in_model is
+       false until the tank exists in the .mbi.
+    """
     return (
         TankConfig(
-            key="bottom",
-            name="REPLACE_WITH_BOTTOM_TANK_NAME",
+            key="A",
+            name="REPLACE_WITH_TANK_A_NAME",
             index=0,
-            stoiip=Distribution(kind="lognormal", p90=20.0, p10=70.0),
-            aquifer_volume=None,
+            official_stoiip=4.5,
+            role="base",
+            connectivity=Connectivity(
+                kind="two_section",
+                p_connected=0.30,
+                isolated_fraction=0.50,
+                group="base_sands",
+                residual=Distribution(kind="lognormal", p90=0.88, p10=1.10),
+            ),
         ),
         TankConfig(
-            key="top",
-            name="REPLACE_WITH_TOP_TANK_NAME",
+            key="B",
+            name="REPLACE_WITH_TANK_B_NAME",
             index=1,
-            stoiip=Distribution(kind="triangular", low=15.0, mode=45.0, high=90.0),
-            aquifer_volume=None,
+            official_stoiip=3.0,
+            role="base",
+            connectivity=Connectivity(
+                kind="two_section",
+                p_connected=0.35,
+                isolated_fraction=0.50,
+                group="base_sands",
+                residual=Distribution(kind="lognormal", p90=0.70, p10=1.25),
+            ),
+        ),
+        TankConfig(
+            key="C",
+            name="REPLACE_WITH_DEEPER_SAND_NAME",
+            index=2,
+            official_stoiip=6.5,
+            role="upside",
+            in_model=False,
+            connectivity=Connectivity(
+                kind="optional",
+                p_connected=0.25,
+                isolated_fraction=0.0,
+                residual=Distribution(kind="lognormal", p90=0.60, p10=1.40),
+            ),
         ),
     )
 
 
+def _default_exploration_volume_model() -> VolumeModel:
+    """Connected-volume prior for the sidetrack dynamic model.
+
+    Mild shared field_scale on base tanks only (Bo / common mapping).
+    Connectivity is the main discrete uncertainty; do not centre official
+    as the mean.
+
+    A and B share the 'base_sands' group: the same barrier is expected to
+    decide both, so their connectivity is strongly correlated rather than
+    independent. Drawing them independently would diversify the dominant
+    risk away and lift the field P90. The deeper sand C is a separate
+    question (presence and charge), so it stays outside the group.
+    """
+    return VolumeModel(
+        kind="connected_volume",
+        official_as="none",
+        field_scale=Distribution(kind="lognormal", p90=0.88, p10=1.10),
+        connectivity_correlation=0.8,
+    )
+
+
+# Petex IPM OpenServer User Manual (Jan 2011) MBAL PREDWELL / PREDINP names.
+# Later IPM builds expose some well constraints with a prediction-step index
+# [{p}], matching the GASLIFTRATE pattern already used in this repo.
 DEFAULT_INDEX_TAGS: dict[str, str] = {
     "tank_stoiip": 'MBAL.MB[0].TANK[{i}].OIIP("{u}")',
     "aquifer_mult": "MBAL.MB[0].TANK[{i}].AQUIFER.VOLRATIO",
+    "gas_lift_rate": "MBAL.MB[0].PREDWELL[{i}][{p}].GASLIFTRATE",
+    "water_inj_rate": "MBAL.MB[0].PREDWELL[{i}][{p}].MAXRATE",
+    "water_inj_min_rate": "MBAL.MB[0].PREDWELL[{i}][{p}].MINRATE",
+    "water_inj_bhp": "MBAL.MB[0].PREDWELL[{i}].CONSTFBHP",
+    "water_inj_max_fbhp": "MBAL.MB[0].PREDWELL[{i}].MAXFBHP",
+    "water_inj_perform": "MBAL.MB[0].PREDWELL[{i}].PERFORMTYPE",
+    "pred_watinj": "MBAL.MB[0].PREDINP.WATINJ",
+    "pred_max_inj_wat": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAXINJWATRATE",
     "cmd_open": 'MBAL.OPENFILE("{path}")',
     "cmd_run_pred": "MBAL.MB[0].PREDICTION.CALCULATE",
     "cmd_close": "MBAL.SHUTDOWN",
@@ -126,12 +326,20 @@ DEFAULT_INDEX_TAGS: dict[str, str] = {
     "res_cumoil": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMOIL("{u}")',
     "res_pressure": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].PRESSURE("{u}")',
     "res_cumwat": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMWATER("{u}")',
+    "res_cumwatinj": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMWATINJ("{u}")',
 }
 
 DEFAULT_NAME_TAGS: dict[str, str] = {
     "tank_stoiip": "MBAL.MB[0].TANK[{tank}].OOIP",
     "aquifer_volume": "MBAL.MB[0].TANK[{tank}].AQUIFVOLUME",
     "gas_lift_rate": "MBAL.MB[0].PREDWELL[{well}][{p}].GASLIFTRATE",
+    "water_inj_rate": "MBAL.MB[0].PREDWELL[{well}][{p}].MAXRATE",
+    "water_inj_min_rate": "MBAL.MB[0].PREDWELL[{well}][{p}].MINRATE",
+    "water_inj_bhp": "MBAL.MB[0].PREDWELL[{well}].CONSTFBHP",
+    "water_inj_max_fbhp": "MBAL.MB[0].PREDWELL[{well}].MAXFBHP",
+    "water_inj_perform": "MBAL.MB[0].PREDWELL[{well}].PERFORMTYPE",
+    "pred_watinj": "MBAL.MB[0].PREDINP.WATINJ",
+    "pred_max_inj_wat": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAXINJWATRATE",
     "cmd_open": 'MBAL.OPENFILE("{path}")',
     "cmd_run_pred": "MBAL.MB[0].PREDICTION.CALCULATE",
     "cmd_close": "MBAL.SHUTDOWN",
@@ -139,6 +347,7 @@ DEFAULT_NAME_TAGS: dict[str, str] = {
     "res_cumoil": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMOIL("{u}")',
     "res_pressure": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].PRESSURE("{u}")',
     "res_cumwat": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMWATER("{u}")',
+    "res_cumwatinj": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMWATINJ("{u}")',
 }
 
 
@@ -154,10 +363,23 @@ class Config:
     tag_mode: str = "index"  # index | name
     tags: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_INDEX_TAGS))
 
+    # --- volume uncertainty -----------------------------------------------
+    volume_model: VolumeModel = field(default_factory=VolumeModel)
+
     # --- gas lift (optional) -----------------------------------------------
     gas_lift_well: str = "REPLACE_WITH_GAS_LIFT_WELL_NAME"
     gas_lift_prediction_index: int = 1
     gas_lift_values: tuple[float, ...] = ()
+
+    # --- water injector (optional) ----------------------------------------
+    # One WATINJ well linked to both tanks in the .mbi; we set well rate/BHP
+    # and MBAL allocates between tanks from injectivity / pressure.
+    water_inj_well: str = "REPLACE_WITH_WATER_INJ_WELL_NAME"
+    water_inj_well_index: int = 0
+    water_inj_prediction_index: int = 1
+    water_inj_rate_values: tuple[float, ...] = ()
+    water_inj_bhp_values: tuple[float, ...] = ()
+    water_inj_control: str = "rate_with_bhp_limit"
 
     # --- Monte Carlo -------------------------------------------------------
     n_realizations: int = 200
@@ -172,19 +394,35 @@ class Config:
     reconnect_every: int = 0  # 0 = never reconnect; N = reopen model every N ok runs
     log_level: str = "INFO"
     extra_percentiles: tuple[float, ...] = (5.0, 95.0)  # reported as P95/P5 (O&G)
+    min_tank_stoiip: float = 0.01  # floor written to MBAL when sampled volume is 0
 
 
-def default_config(*, gas_lift: bool = False) -> Config:
-    """Return the canned default Config for either workflow."""
-    if gas_lift:
-        return Config(
-            tanks=_default_name_tanks(),
-            tag_mode="name",
-            tags=dict(DEFAULT_NAME_TAGS),
-            out_csv="mbal_gas_lift_results.csv",
-            out_dir="mbal_gas_lift_output",
-        )
-    return Config()
+def default_config(
+    *,
+    gas_lift_values: tuple[float, ...] = (),
+    water_inj_rate_values: tuple[float, ...] = (),
+    water_inj_bhp_values: tuple[float, ...] = (),
+) -> Config:
+    """This well: three tanks, connected-volume prior.
+
+    Gas-lift and water-injection lists are empty unless the caller (YAML or
+    CLI) fills them. The same three tanks are used in every case.
+    """
+    return Config(
+        tanks=_default_exploration_tanks(),
+        tag_mode="name",
+        tags=dict(DEFAULT_NAME_TAGS),
+        unit_stoiip="MSm3",
+        unit_cum="MSm3",
+        unit_press="bara",
+        volume_model=_default_exploration_volume_model(),
+        out_csv="mbal_results.csv",
+        out_dir="mbal_output",
+        gas_lift_values=gas_lift_values,
+        water_inj_rate_values=water_inj_rate_values,
+        water_inj_bhp_values=water_inj_bhp_values,
+        water_inj_control="rate_with_bhp_limit",
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -221,8 +459,9 @@ def _parse_tank(raw: dict[str, Any], position: int) -> TankConfig:
     key = str(raw["key"])
     name = str(raw.get("name", key))
     index = int(raw.get("index", position))
-    if "stoiip" not in raw:
-        raise ValueError(f"tank[{position}] ({key}): missing stoiip")
+    stoiip = None
+    if raw.get("stoiip") is not None:
+        stoiip = _parse_distribution(raw["stoiip"], f"tank {key} STOIIP")
     aquifer_multiplier = None
     if raw.get("aquifer_multiplier") is not None:
         aquifer_multiplier = _parse_distribution(
@@ -233,19 +472,96 @@ def _parse_tank(raw: dict[str, Any], position: int) -> TankConfig:
         aquifer_volume = _parse_distribution(
             raw["aquifer_volume"], f"tank {key} aquifer_volume"
         )
+    residual = None
+    if raw.get("residual") is not None:
+        residual = _parse_distribution(raw["residual"], f"tank {key} residual")
+    official = _optional_float(raw.get("official_stoiip"))
+    if stoiip is None and official is None:
+        raise ValueError(
+            f"tank[{position}] ({key}): provide stoiip or official_stoiip"
+        )
+    connectivity = None
+    if raw.get("connectivity") is not None:
+        connectivity = _parse_connectivity(
+            raw["connectivity"], f"tank {key} connectivity"
+        )
+    in_model = True
+    if "in_model" in raw and raw["in_model"] is not None:
+        in_model = bool(raw["in_model"])
+    role = str(raw.get("role", "base")).lower()
     return TankConfig(
         key=key,
         name=name,
         index=index,
-        stoiip=_parse_distribution(raw["stoiip"], f"tank {key} STOIIP"),
+        stoiip=stoiip,
         aquifer_multiplier=aquifer_multiplier,
         aquifer_volume=aquifer_volume,
+        official_stoiip=official,
+        residual=residual,
+        role=role,
+        in_model=in_model,
+        connectivity=connectivity,
     )
+
+
+def _parse_connectivity(raw: Any, label: str) -> Connectivity:
+    if not isinstance(raw, dict):
+        raise TypeError(f"{label} must be a mapping")
+    residual = None
+    if raw.get("residual") is not None:
+        residual = _parse_distribution(raw["residual"], f"{label} residual")
+    if raw.get("p_connected") is None:
+        raise ValueError(f"{label}: missing p_connected")
+    isolated = raw.get("isolated_fraction")
+    group = raw.get("group")
+    return Connectivity(
+        kind=str(raw.get("kind", "")).lower(),
+        p_connected=float(raw["p_connected"]),
+        isolated_fraction=0.0 if isolated is None else float(isolated),
+        group=None if group is None else str(group),
+        residual=residual,
+    )
+
+
+def _parse_volume_model(raw: Any) -> VolumeModel:
+    if not isinstance(raw, dict):
+        raise TypeError("volume_model must be a mapping")
+    field_scale = None
+    if raw.get("field_scale") is not None:
+        field_scale = _parse_distribution(raw["field_scale"], "field_scale")
+    residual = None
+    if raw.get("residual") is not None:
+        residual = _parse_distribution(raw["residual"], "volume residual")
+    correlation = raw.get("connectivity_correlation")
+    return VolumeModel(
+        kind=str(raw.get("kind", "independent")).lower(),
+        official_as=str(raw.get("official_as", "none")).lower(),
+        field_scale=field_scale,
+        residual=residual,
+        max_multiplier=_optional_float(raw.get("max_multiplier")),
+        connectivity_correlation=0.0 if correlation is None else float(correlation),
+    )
+
+
+def _parse_float_tuple(raw: Any, label: str) -> tuple[float, ...]:
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        try:
+            return tuple(
+                float(part.strip()) for part in raw.split(",") if part.strip()
+            )
+        except ValueError as error:
+            raise ValueError(f"invalid {label}: {error}") from error
+    try:
+        return tuple(float(v) for v in raw)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"invalid {label}: {error}") from error
 
 
 def config_from_dict(data: dict[str, Any], *, base: Config | None = None) -> Config:
     """Build a Config from a plain dict (e.g. loaded YAML)."""
-    cfg = base if base is not None else default_config(gas_lift=False)
+    cfg = base if base is not None else default_config()
     updates: dict[str, Any] = {}
 
     simple = (
@@ -256,6 +572,8 @@ def config_from_dict(data: dict[str, Any], *, base: Config | None = None) -> Con
         "unit_cum",
         "tag_mode",
         "gas_lift_well",
+        "water_inj_well",
+        "water_inj_control",
         "out_csv",
         "out_dir",
         "sampling",
@@ -269,11 +587,16 @@ def config_from_dict(data: dict[str, Any], *, base: Config | None = None) -> Con
         "n_realizations",
         "seed",
         "gas_lift_prediction_index",
+        "water_inj_well_index",
+        "water_inj_prediction_index",
         "reconnect_every",
     )
     for key in int_keys:
         if key in data and data[key] is not None:
             updates[key] = int(data[key])
+
+    if "min_tank_stoiip" in data and data["min_tank_stoiip"] is not None:
+        updates["min_tank_stoiip"] = float(data["min_tank_stoiip"])
 
     # aliases
     if "n" in data and data["n"] is not None and "n_realizations" not in updates:
@@ -287,16 +610,19 @@ def config_from_dict(data: dict[str, Any], *, base: Config | None = None) -> Con
             updates[key] = bool(data[key])
 
     if "gas_lift_values" in data and data["gas_lift_values"] is not None:
-        raw_values = data["gas_lift_values"]
-        if isinstance(raw_values, str):
-            values = tuple(
-                float(part.strip())
-                for part in raw_values.split(",")
-                if part.strip()
-            )
-        else:
-            values = tuple(float(v) for v in raw_values)
-        updates["gas_lift_values"] = values
+        updates["gas_lift_values"] = _parse_float_tuple(
+            data["gas_lift_values"], "gas_lift_values"
+        )
+    if "water_inj_rate_values" in data and data["water_inj_rate_values"] is not None:
+        updates["water_inj_rate_values"] = _parse_float_tuple(
+            data["water_inj_rate_values"], "water_inj_rate_values"
+        )
+    if "water_inj_bhp_values" in data and data["water_inj_bhp_values"] is not None:
+        updates["water_inj_bhp_values"] = _parse_float_tuple(
+            data["water_inj_bhp_values"], "water_inj_bhp_values"
+        )
+    if "volume_model" in data and data["volume_model"] is not None:
+        updates["volume_model"] = _parse_volume_model(data["volume_model"])
 
     if "extra_percentiles" in data and data["extra_percentiles"] is not None:
         updates["extra_percentiles"] = tuple(
@@ -357,8 +683,19 @@ def config_to_dict(cfg: Config) -> dict[str, Any]:
             "key": tank.key,
             "name": tank.name,
             "index": tank.index,
-            "stoiip": tank.stoiip.to_dict(),
         }
+        if tank.official_stoiip is not None:
+            item["official_stoiip"] = tank.official_stoiip
+        if tank.stoiip is not None:
+            item["stoiip"] = tank.stoiip.to_dict()
+        if tank.residual is not None:
+            item["residual"] = tank.residual.to_dict()
+        if tank.role != "base":
+            item["role"] = tank.role
+        if not tank.in_model:
+            item["in_model"] = False
+        if tank.connectivity is not None:
+            item["connectivity"] = tank.connectivity.to_dict()
         if tank.aquifer_multiplier is not None:
             item["aquifer_multiplier"] = tank.aquifer_multiplier.to_dict()
         if tank.aquifer_volume is not None:
@@ -381,9 +718,17 @@ def config_to_dict(cfg: Config) -> dict[str, Any]:
         "validate_tags": cfg.validate_tags,
         "reconnect_every": cfg.reconnect_every,
         "log_level": cfg.log_level,
+        "volume_model": cfg.volume_model.to_dict(),
         "gas_lift_well": cfg.gas_lift_well,
         "gas_lift_prediction_index": cfg.gas_lift_prediction_index,
         "gas_lift_values": list(cfg.gas_lift_values),
+        "water_inj_well": cfg.water_inj_well,
+        "water_inj_well_index": cfg.water_inj_well_index,
+        "water_inj_prediction_index": cfg.water_inj_prediction_index,
+        "water_inj_rate_values": list(cfg.water_inj_rate_values),
+        "water_inj_bhp_values": list(cfg.water_inj_bhp_values),
+        "water_inj_control": cfg.water_inj_control,
+        "min_tank_stoiip": cfg.min_tank_stoiip,
         "extra_percentiles": list(cfg.extra_percentiles),
         "tanks": tanks,
         "tags": dict(cfg.tags),
@@ -465,6 +810,8 @@ def validate_config(cfg: Config) -> None:
     if missing_tags:
         raise ValueError(f"tags missing required keys: {sorted(missing_tags)}")
 
+    _validate_volume_model(cfg)
+
     for tank in cfg.tanks:
         if not _KEY_PATTERN.fullmatch(tank.key):
             raise ValueError(
@@ -473,7 +820,6 @@ def validate_config(cfg: Config) -> None:
             )
         if tank.index < 0:
             raise ValueError(f"tank {tank.key}: index must be non-negative")
-        validate_distribution(tank.stoiip, f"tank {tank.key} STOIIP")
         if tank.aquifer_multiplier is not None:
             validate_distribution(
                 tank.aquifer_multiplier, f"tank {tank.key} aquifer multiplier"
@@ -486,6 +832,216 @@ def validate_config(cfg: Config) -> None:
         raise ValueError("gas-lift sensitivity values must be finite and >= 0")
     if cfg.gas_lift_values and "gas_lift_rate" not in cfg.tags:
         raise ValueError("gas_lift_values set but tags['gas_lift_rate'] is missing")
+    _validate_water_inj(cfg)
+
+
+def _tank_residual(cfg: Config, tank: TankConfig) -> Distribution | None:
+    if tank.connectivity is not None and tank.connectivity.residual is not None:
+        return tank.connectivity.residual
+    if tank.residual is not None:
+        return tank.residual
+    return cfg.volume_model.residual
+
+
+def _tanks_in_model(cfg: Config) -> tuple[TankConfig, ...]:
+    return tuple(tank for tank in cfg.tanks if tank.in_model)
+
+
+def _tanks_with_role(cfg: Config, role: str) -> tuple[TankConfig, ...]:
+    return tuple(tank for tank in cfg.tanks if tank.role.lower() == role)
+
+
+def _correlated_connectivity_groups(cfg: Config) -> tuple[str, ...]:
+    """Connectivity groups whose draws are actually shared, in tank order.
+
+    A group is live only when the correlation is positive and at least two
+    tanks in it still have an uncertain p_connected. Anything else leaves
+    the per-tank draws untouched, so existing seeds reproduce exactly.
+    """
+    if cfg.volume_model.connectivity_correlation <= 0.0:
+        return ()
+    counts: dict[str, int] = {}
+    for tank in cfg.tanks:
+        conn = tank.connectivity
+        if conn is None or conn.group is None:
+            continue
+        if 0.0 < conn.p_connected < 1.0:
+            counts[conn.group] = counts.get(conn.group, 0) + 1
+    return tuple(name for name, count in counts.items() if count > 1)
+
+
+def _validate_volume_model(cfg: Config) -> None:
+    model = cfg.volume_model
+    kind = model.kind.lower()
+    if kind not in {"independent", "fmu_residual", "connected_volume"}:
+        raise ValueError(
+            "volume_model.kind must be 'independent', 'fmu_residual', "
+            "or 'connected_volume'"
+        )
+    anchor = model.official_as.lower()
+    if anchor not in {"none", "p50", "p40", "p30"}:
+        raise ValueError(
+            "volume_model.official_as must be one of: none, p50, p40, p30"
+        )
+    if model.max_multiplier is not None and (
+        not math.isfinite(model.max_multiplier) or model.max_multiplier <= 0.0
+    ):
+        raise ValueError("volume_model.max_multiplier must be finite and > 0")
+    if not math.isfinite(model.connectivity_correlation) or not (
+        0.0 <= model.connectivity_correlation <= 1.0
+    ):
+        raise ValueError(
+            "volume_model.connectivity_correlation must be in [0, 1]"
+        )
+    if cfg.min_tank_stoiip < 0.0 or not math.isfinite(cfg.min_tank_stoiip):
+        raise ValueError("min_tank_stoiip must be finite and >= 0")
+
+    for tank in cfg.tanks:
+        if tank.role.lower() not in {"base", "upside"}:
+            raise ValueError(f"tank {tank.key}: role must be 'base' or 'upside'")
+
+    if kind == "independent":
+        for tank in cfg.tanks:
+            if tank.stoiip is None:
+                raise ValueError(
+                    f"tank {tank.key}: independent volume model requires stoiip"
+                )
+            validate_distribution(tank.stoiip, f"tank {tank.key} STOIIP")
+        if len(cfg.tanks) > 1:
+            LOG.warning(
+                "Independent per-tank STOIIP treats tank volumes as uncorrelated. "
+                "That usually makes the field low-case (P90) too high. "
+                "Prefer volume_model.kind: connected_volume for this well."
+            )
+        return
+
+    if kind == "fmu_residual":
+        if model.field_scale is None:
+            raise ValueError("fmu_residual volume model requires field_scale")
+        validate_distribution(model.field_scale, "field_scale")
+        for tank in cfg.tanks:
+            if tank.official_stoiip is None or tank.official_stoiip <= 0.0:
+                raise ValueError(
+                    f"tank {tank.key}: fmu_residual requires official_stoiip > 0"
+                )
+            if tank.stoiip is not None:
+                raise ValueError(
+                    f"tank {tank.key}: use official_stoiip (not stoiip) "
+                    "with volume_model.kind: fmu_residual"
+                )
+            residual = _tank_residual(cfg, tank)
+            if residual is None:
+                raise ValueError(
+                    f"tank {tank.key}: fmu_residual requires a residual "
+                    "distribution (volume_model.residual or tank.residual)"
+                )
+            validate_distribution(residual, f"tank {tank.key} residual")
+        return
+
+    if model.field_scale is not None:
+        validate_distribution(model.field_scale, "field_scale")
+    for tank in cfg.tanks:
+        if tank.official_stoiip is None or tank.official_stoiip <= 0.0:
+            raise ValueError(
+                f"tank {tank.key}: connected_volume requires official_stoiip > 0"
+            )
+        if tank.stoiip is not None:
+            raise ValueError(
+                f"tank {tank.key}: use official_stoiip (not stoiip) "
+                "with volume_model.kind: connected_volume"
+            )
+        if tank.connectivity is None:
+            raise ValueError(
+                f"tank {tank.key}: connected_volume requires connectivity"
+            )
+        _validate_connectivity(tank.connectivity, f"tank {tank.key} connectivity")
+        residual = _tank_residual(cfg, tank)
+        if residual is None:
+            raise ValueError(
+                f"tank {tank.key}: connected_volume requires a residual "
+                "on connectivity, the tank, or volume_model"
+            )
+        validate_distribution(residual, f"tank {tank.key} residual")
+
+    grouped = any(
+        tank.connectivity is not None and tank.connectivity.group is not None
+        for tank in cfg.tanks
+    )
+    if model.connectivity_correlation > 0.0 and not _correlated_connectivity_groups(cfg):
+        LOG.warning(
+            "connectivity_correlation is set but no connectivity.group is shared by "
+            "two tanks with an uncertain p_connected — draws stay independent."
+        )
+    elif grouped and model.connectivity_correlation <= 0.0:
+        LOG.warning(
+            "Tanks share a connectivity.group but connectivity_correlation is 0, so "
+            "the shared barrier is drawn independently per tank. That is false "
+            "diversification and it lifts the field low case (P90)."
+        )
+
+
+def _validate_connectivity(conn: Connectivity, label: str) -> None:
+    if conn.kind not in {"two_section", "optional"}:
+        raise ValueError(f"{label}: kind must be 'two_section' or 'optional'")
+    if conn.group is not None and not conn.group.strip():
+        raise ValueError(f"{label}: group must be a non-empty name or omitted")
+    if not math.isfinite(conn.p_connected) or not 0.0 <= conn.p_connected <= 1.0:
+        raise ValueError(f"{label}: p_connected must be in [0, 1]")
+    if not math.isfinite(conn.isolated_fraction) or not (
+        0.0 <= conn.isolated_fraction <= 1.0
+    ):
+        raise ValueError(f"{label}: isolated_fraction must be in [0, 1]")
+    if conn.kind == "optional" and conn.isolated_fraction != 0.0:
+        raise ValueError(f"{label}: optional connectivity requires isolated_fraction=0")
+
+
+def _validate_water_inj(cfg: Config) -> None:
+    control = cfg.water_inj_control.lower()
+    if control not in {"rate", "bhp", "rate_with_bhp_limit"}:
+        raise ValueError(
+            "water_inj_control must be 'rate', 'bhp', or 'rate_with_bhp_limit'"
+        )
+    if any(
+        value < 0.0 or not math.isfinite(value) for value in cfg.water_inj_rate_values
+    ):
+        raise ValueError("water-injection rate values must be finite and >= 0")
+    if any(
+        value <= 0.0 or not math.isfinite(value) for value in cfg.water_inj_bhp_values
+    ):
+        raise ValueError("water-injection BHP values must be finite and > 0")
+    if cfg.water_inj_well_index < 0:
+        raise ValueError("water_inj_well_index must be non-negative")
+    if cfg.water_inj_prediction_index < 0:
+        raise ValueError("water_inj_prediction_index must be non-negative")
+
+    has_rate = bool(cfg.water_inj_rate_values)
+    has_bhp = bool(cfg.water_inj_bhp_values)
+    if not has_rate and not has_bhp:
+        return
+    if control == "rate" and not has_rate:
+        raise ValueError("water_inj_control='rate' requires water_inj_rate_values")
+    if control == "bhp" and not has_bhp:
+        raise ValueError("water_inj_control='bhp' requires water_inj_bhp_values")
+    if control == "rate_with_bhp_limit" and not has_rate:
+        raise ValueError(
+            "water_inj_control='rate_with_bhp_limit' requires water_inj_rate_values"
+        )
+    if has_rate and "water_inj_rate" not in cfg.tags:
+        raise ValueError(
+            "water_inj_rate_values set but tags['water_inj_rate'] is missing"
+        )
+    if has_bhp:
+        if control == "bhp" and "water_inj_bhp" not in cfg.tags:
+            raise ValueError(
+                "water_inj_bhp_values set but tags['water_inj_bhp'] is missing"
+            )
+        if control != "bhp" and not (
+            "water_inj_max_fbhp" in cfg.tags or "water_inj_bhp" in cfg.tags
+        ):
+            raise ValueError(
+                "water_inj_bhp_values set but tags lack water_inj_max_fbhp / "
+                "water_inj_bhp"
+            )
 
 
 def lognormal_from_p90_p10(p90: float, p10: float) -> tuple[float, float]:
@@ -557,6 +1113,32 @@ def _norm_ppf(u: np.ndarray) -> np.ndarray:
         return out
 
 
+def _norm_cdf(x: np.ndarray) -> np.ndarray:
+    try:
+        from scipy.stats import norm
+
+        return np.asarray(norm.cdf(x), dtype=float)
+    except ImportError:
+        erf = np.vectorize(math.erf, otypes=[float])
+        return 0.5 * (1.0 + erf(x / math.sqrt(2.0)))
+
+
+def _correlate_unit(
+    u: np.ndarray, shared: np.ndarray, correlation: float
+) -> np.ndarray:
+    """Couple a tank's unit draw to a shared factor, keeping it U(0,1).
+
+    One-factor Gaussian copula: X = sqrt(rho) * Z + sqrt(1 - rho) * E, so
+    corr(X_i, X_j) is exactly rho for two tanks on the same factor Z, and
+    each X stays standard normal. The tank's own p_connected is therefore
+    untouched — only the joint behaviour changes. rho = 1 collapses every
+    tank in the group onto one draw (one barrier decides them all).
+    """
+    own = _norm_ppf(u)
+    latent = math.sqrt(correlation) * shared + math.sqrt(1.0 - correlation) * own
+    return _norm_cdf(latent)
+
+
 def _tri_ppf(u: np.ndarray, low: float, mode: float, high: float) -> np.ndarray:
     c = (mode - low) / (high - low)
     return np.where(
@@ -616,11 +1198,89 @@ def sample_distribution(dist: Distribution, u: np.ndarray | None, n: int) -> np.
     raise ValueError(f"unknown distribution {dist.kind!r}")
 
 
+def _sensitivity_factors(cfg: Config) -> list[tuple[str, tuple[float, ...]]]:
+    """Deterministic operational knobs expanded across every volume sample."""
+    factors: list[tuple[str, tuple[float, ...]]] = []
+    if cfg.gas_lift_values:
+        factors.append(("gas_lift_rate", cfg.gas_lift_values))
+    if cfg.water_inj_rate_values:
+        factors.append(("water_inj_rate", cfg.water_inj_rate_values))
+    if cfg.water_inj_bhp_values:
+        factors.append(("water_inj_bhp", cfg.water_inj_bhp_values))
+    return factors
+
+
+def _expand_sensitivity(samples: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    """Cartesian-expand volume samples by every operational sensitivity."""
+    factors = _sensitivity_factors(cfg)
+    if not factors:
+        return samples
+    out = samples.copy()
+    out["base_realization"] = out["realization"]
+    for name, values in factors:
+        parts = []
+        for value in values:
+            block = out.copy()
+            block[name] = float(value)
+            parts.append(block)
+        out = pd.concat(parts, ignore_index=True)
+    out["realization"] = np.arange(len(out), dtype=int)
+    return out
+
+
+def _anchor_stat_percentile(official_as: str) -> float | None:
+    key = official_as.lower()
+    if key == "none":
+        return None
+    if key not in _OG_TO_STAT:
+        raise ValueError(f"unknown official_as {official_as!r}")
+    return _OG_TO_STAT[key]
+
+
+def _apply_volume_anchor(
+    multipliers: np.ndarray, official_as: str
+) -> np.ndarray:
+    """Rescale multipliers so official sits at the requested O&G percentile."""
+    stat = _anchor_stat_percentile(official_as)
+    if stat is None:
+        return multipliers
+    quantile = float(np.percentile(multipliers, stat))
+    if quantile <= 0.0 or not math.isfinite(quantile):
+        raise ValueError(
+            "cannot anchor official_as: multiplier quantile is not positive"
+        )
+    return multipliers / quantile
+
+
 def build_sample_table(cfg: Config) -> pd.DataFrame:
-    """Sample every tank independently and derive the field total afterward."""
+    """Sample tank-volume inputs, then expand operational sensitivities."""
     validate_config(cfg)
 
-    distributions: list[Distribution] = [tank.stoiip for tank in cfg.tanks]
+    distributions: list[Distribution] = []
+    model = cfg.volume_model
+    kind = model.kind.lower()
+    connect_draws = 0
+    if kind == "fmu_residual":
+        assert model.field_scale is not None
+        distributions.append(model.field_scale)
+        for tank in cfg.tanks:
+            residual = _tank_residual(cfg, tank)
+            assert residual is not None
+            distributions.append(residual)
+    elif kind == "connected_volume":
+        if model.field_scale is not None:
+            distributions.append(model.field_scale)
+        for tank in cfg.tanks:
+            residual = _tank_residual(cfg, tank)
+            assert residual is not None
+            distributions.append(residual)
+            assert tank.connectivity is not None
+            if 0.0 < tank.connectivity.p_connected < 1.0:
+                connect_draws += 1
+    else:
+        for tank in cfg.tanks:
+            assert tank.stoiip is not None
+            distributions.append(tank.stoiip)
     distributions.extend(
         tank.aquifer_multiplier
         for tank in cfg.tanks
@@ -629,8 +1289,19 @@ def build_sample_table(cfg: Config) -> pd.DataFrame:
     distributions.extend(
         tank.aquifer_volume for tank in cfg.tanks if tank.aquifer_volume is not None
     )
-    dimensions = sum(_needs_random_dimension(dist) for dist in distributions)
-    unit_samples = unit_hypercube(cfg.n_realizations, dimensions, cfg)
+    groups = _correlated_connectivity_groups(cfg)
+    base_dimensions = (
+        sum(_needs_random_dimension(dist) for dist in distributions) + connect_draws
+    )
+    # Shared connectivity factors sit at the tail of the hypercube, so per-tank
+    # column assignment - and any existing seed - is unchanged without groups.
+    unit_samples = unit_hypercube(
+        cfg.n_realizations, base_dimensions + len(groups), cfg
+    )
+    shared_factors = {
+        name: _norm_ppf(unit_samples[:, base_dimensions + offset])
+        for offset, name in enumerate(groups)
+    }
     next_dimension = 0
 
     def draw(dist: Distribution) -> np.ndarray:
@@ -642,18 +1313,110 @@ def build_sample_table(cfg: Config) -> pd.DataFrame:
             u = None
         return sample_distribution(dist, u, cfg.n_realizations)
 
+    def draw_unit() -> np.ndarray:
+        nonlocal next_dimension
+        u = unit_samples[:, next_dimension]
+        next_dimension += 1
+        return u
+
     data: dict[str, np.ndarray] = {
         "realization": np.arange(cfg.n_realizations, dtype=int)
     }
     stoiip_columns: list[str] = []
-    for tank in cfg.tanks:
-        column = f"stoiip_{tank.key}"
-        data[column] = draw(tank.stoiip)
-        stoiip_columns.append(column)
+
+    if kind == "fmu_residual":
+        assert model.field_scale is not None
+        field_scale = draw(model.field_scale)
+        data["field_scale"] = field_scale
+        for tank in cfg.tanks:
+            assert tank.official_stoiip is not None
+            residual = _tank_residual(cfg, tank)
+            assert residual is not None
+            residual_samples = draw(residual)
+            data[f"official_{tank.key}"] = np.full(
+                cfg.n_realizations, float(tank.official_stoiip), dtype=float
+            )
+            data[f"residual_{tank.key}"] = residual_samples
+            multipliers = _apply_volume_anchor(
+                field_scale * residual_samples, model.official_as
+            )
+            if model.max_multiplier is not None:
+                multipliers = np.minimum(multipliers, float(model.max_multiplier))
+            column = f"stoiip_{tank.key}"
+            data[column] = float(tank.official_stoiip) * multipliers
+            stoiip_columns.append(column)
+    elif kind == "connected_volume":
+        if model.field_scale is not None:
+            field_scale = draw(model.field_scale)
+            data["field_scale"] = field_scale
+        else:
+            field_scale = np.ones(cfg.n_realizations, dtype=float)
+        for tank in cfg.tanks:
+            assert tank.official_stoiip is not None
+            assert tank.connectivity is not None
+            residual = _tank_residual(cfg, tank)
+            assert residual is not None
+            residual_samples = draw(residual)
+            conn = tank.connectivity
+            if 0.0 < conn.p_connected < 1.0:
+                unit = draw_unit()
+                if conn.group in shared_factors:
+                    unit = _correlate_unit(
+                        unit,
+                        shared_factors[conn.group],
+                        cfg.volume_model.connectivity_correlation,
+                    )
+                connected = (unit < conn.p_connected).astype(float)
+            else:
+                connected = np.full(
+                    cfg.n_realizations, float(conn.p_connected >= 1.0), dtype=float
+                )
+            connect_frac = np.where(
+                connected > 0.5, 1.0, float(conn.isolated_fraction)
+            )
+            scale = (
+                field_scale
+                if tank.role.lower() == "base"
+                else np.ones(cfg.n_realizations, dtype=float)
+            )
+            multipliers = residual_samples * scale
+            if model.max_multiplier is not None:
+                multipliers = np.minimum(multipliers, float(model.max_multiplier))
+            data[f"official_{tank.key}"] = np.full(
+                cfg.n_realizations, float(tank.official_stoiip), dtype=float
+            )
+            data[f"residual_{tank.key}"] = residual_samples
+            data[f"connected_{tank.key}"] = connected
+            data[f"connect_frac_{tank.key}"] = connect_frac
+            column = f"stoiip_{tank.key}"
+            data[column] = float(tank.official_stoiip) * connect_frac * multipliers
+            stoiip_columns.append(column)
+    else:
+        for tank in cfg.tanks:
+            assert tank.stoiip is not None
+            column = f"stoiip_{tank.key}"
+            data[column] = draw(tank.stoiip)
+            stoiip_columns.append(column)
 
     data["stoiip_total"] = np.sum(
         np.column_stack([data[column] for column in stoiip_columns]), axis=1
     )
+    if kind == "connected_volume":
+        base_cols = [f"stoiip_{tank.key}" for tank in _tanks_with_role(cfg, "base")]
+        upside_cols = [f"stoiip_{tank.key}" for tank in _tanks_with_role(cfg, "upside")]
+        in_model_cols = [f"stoiip_{tank.key}" for tank in _tanks_in_model(cfg)]
+        if base_cols:
+            data["stoiip_base"] = np.sum(
+                np.column_stack([data[column] for column in base_cols]), axis=1
+            )
+        if upside_cols:
+            data["stoiip_upside"] = np.sum(
+                np.column_stack([data[column] for column in upside_cols]), axis=1
+            )
+        if in_model_cols:
+            data["stoiip_in_model"] = np.sum(
+                np.column_stack([data[column] for column in in_model_cols]), axis=1
+            )
 
     for tank in cfg.tanks:
         if tank.aquifer_multiplier is not None:
@@ -662,16 +1425,7 @@ def build_sample_table(cfg: Config) -> pd.DataFrame:
             data[f"aquifer_volume_{tank.key}"] = draw(tank.aquifer_volume)
 
     samples = pd.DataFrame(data)
-    if cfg.gas_lift_values:
-        blocks = []
-        for gas_lift_rate in cfg.gas_lift_values:
-            block = samples.copy()
-            block["base_realization"] = block["realization"]
-            block["gas_lift_rate"] = float(gas_lift_rate)
-            blocks.append(block)
-        samples = pd.concat(blocks, ignore_index=True)
-        samples["realization"] = np.arange(len(samples), dtype=int)
-    return samples
+    return _expand_sensitivity(samples, cfg)
 
 
 # -----------------------------------------------------------------------------
@@ -680,7 +1434,7 @@ def build_sample_table(cfg: Config) -> pd.DataFrame:
 
 
 class SetServer(Protocol):
-    def set(self, tag: str, value: float) -> None: ...
+    def set(self, tag: str, value: float | str) -> None: ...
 
 
 class OpenServer:
@@ -706,23 +1460,27 @@ class OpenServer:
         """Run a calculation command that may block until MBAL completes."""
         self._check(self.os.DoSlowCommand(command), command)
 
-    def set(self, tag: str, value: float) -> None:
+    def set(self, tag: str, value: float | str) -> None:
         self._check(self.os.DoSet(tag, value), f"DoSet {tag}")
 
-    def get(self, tag: str) -> float:
+    def get_raw(self, tag: str) -> Any:
+        """Return the raw OpenServer value (numeric or list-keyword string)."""
         value = self.os.DoGet(tag)
         error = self.os.GetLastError("MBAL")
         if error:
             raise RuntimeError(
                 f"OpenServer error reading {tag}: {self.os.GetErrorDescription(error)}"
             )
-        return float(value)
+        return value
 
-    def try_get(self, tag: str) -> float | None:
-        """Return float value or None if the tag is not readable."""
+    def get(self, tag: str) -> float:
+        return float(self.get_raw(tag))
+
+    def try_get(self, tag: str) -> Any | None:
+        """Return the raw value or None if the tag is not readable."""
         try:
-            return self.get(tag)
-        except (RuntimeError, TypeError, ValueError):
+            return self.get_raw(tag)
+        except RuntimeError:
             return None
 
     def shutdown(self, close_tag: str) -> None:
@@ -762,14 +1520,24 @@ def _aquifer_volume_tag(cfg: Config, tank: TankConfig) -> str:
 
 def _gas_lift_tag(cfg: Config) -> str:
     return cfg.tags["gas_lift_rate"].format(
-        well=cfg.gas_lift_well, p=cfg.gas_lift_prediction_index
+        well=cfg.gas_lift_well, p=cfg.gas_lift_prediction_index, i=0
+    )
+
+
+def _format_inj_tag(cfg: Config, key: str) -> str:
+    return cfg.tags[key].format(
+        well=cfg.water_inj_well,
+        i=cfg.water_inj_well_index,
+        p=cfg.water_inj_prediction_index,
+        tank="",
+        u=cfg.unit_press,
     )
 
 
 def input_tags_for_validation(cfg: Config) -> list[tuple[str, str]]:
     """Return (label, tag) pairs that should be readable/writable after open."""
     pairs: list[tuple[str, str]] = []
-    for tank in cfg.tanks:
+    for tank in _tanks_in_model(cfg):
         pairs.append((f"STOIIP/{tank.key}", _stoiip_tag(cfg, tank)))
         if tank.aquifer_multiplier is not None and "aquifer_mult" in cfg.tags:
             pairs.append(
@@ -781,7 +1549,21 @@ def input_tags_for_validation(cfg: Config) -> list[tuple[str, str]]:
             )
     if cfg.gas_lift_values and "gas_lift_rate" in cfg.tags:
         pairs.append(("gas_lift_rate", _gas_lift_tag(cfg)))
+    if cfg.water_inj_rate_values and "water_inj_rate" in cfg.tags:
+        pairs.append(("water_inj_rate", _format_inj_tag(cfg, "water_inj_rate")))
+    if cfg.water_inj_bhp_values:
+        bhp_key = _water_inj_bhp_tag_key(cfg)
+        if bhp_key in cfg.tags:
+            pairs.append((bhp_key, _format_inj_tag(cfg, bhp_key)))
     return pairs
+
+
+def _water_inj_bhp_tag_key(cfg: Config) -> str:
+    if cfg.water_inj_control.lower() == "bhp":
+        return "water_inj_bhp"
+    if "water_inj_max_fbhp" in cfg.tags:
+        return "water_inj_max_fbhp"
+    return "water_inj_bhp"
 
 
 def validate_openserver_tags(srv: OpenServer, cfg: Config) -> None:
@@ -803,9 +1585,10 @@ def validate_openserver_tags(srv: OpenServer, cfg: Config) -> None:
 
 
 def apply_realization(srv: SetServer, row: pd.Series, cfg: Config) -> None:
-    """Write each tank's independently sampled inputs into MBAL."""
-    for tank in cfg.tanks:
-        srv.set(_stoiip_tag(cfg, tank), float(row[f"stoiip_{tank.key}"]))
+    """Write each in-model tank's sampled inputs into MBAL."""
+    for tank in _tanks_in_model(cfg):
+        volume = max(float(row[f"stoiip_{tank.key}"]), cfg.min_tank_stoiip)
+        srv.set(_stoiip_tag(cfg, tank), volume)
         if tank.aquifer_multiplier is not None:
             if "aquifer_mult" not in cfg.tags:
                 raise KeyError("tank has aquifer_multiplier but tags lack aquifer_mult")
@@ -824,17 +1607,74 @@ def apply_realization(srv: SetServer, row: pd.Series, cfg: Config) -> None:
     if "gas_lift_rate" in row.index and pd.notna(row["gas_lift_rate"]):
         srv.set(_gas_lift_tag(cfg), float(row["gas_lift_rate"]))
 
+    _apply_water_inj(srv, row, cfg)
+
+
+def _series_has(row: pd.Series, column: str) -> bool:
+    return column in row.index and pd.notna(row[column])
+
+
+def _apply_water_inj(srv: SetServer, row: pd.Series, cfg: Config) -> None:
+    """Write water-injector rate / BHP. One well, both tanks (MBAL allocation)."""
+    has_rate = _series_has(row, "water_inj_rate")
+    has_bhp = _series_has(row, "water_inj_bhp")
+    if not has_rate and not has_bhp:
+        return
+
+    if "pred_watinj" in cfg.tags:
+        srv.set(_format_inj_tag(cfg, "pred_watinj"), "YES")
+
+    control = cfg.water_inj_control.lower()
+    if has_rate:
+        rate = float(row["water_inj_rate"])
+        srv.set(_format_inj_tag(cfg, "water_inj_rate"), rate)
+        if control == "rate" and "water_inj_min_rate" in cfg.tags:
+            srv.set(_format_inj_tag(cfg, "water_inj_min_rate"), rate)
+        if "pred_max_inj_wat" in cfg.tags:
+            srv.set(_format_inj_tag(cfg, "pred_max_inj_wat"), rate)
+
+    if has_bhp:
+        bhp = float(row["water_inj_bhp"])
+        if control == "bhp":
+            if "water_inj_perform" in cfg.tags:
+                srv.set(_format_inj_tag(cfg, "water_inj_perform"), "CFBHP")
+            srv.set(_format_inj_tag(cfg, "water_inj_bhp"), bhp)
+        else:
+            srv.set(_format_inj_tag(cfg, _water_inj_bhp_tag_key(cfg)), bhp)
+
 
 def read_results(srv: OpenServer, cfg: Config, row: pd.Series) -> dict[str, float]:
     """Read the last prediction state for every configured tank."""
     output: dict[str, float] = {}
-    for tank in cfg.tanks:
-        try:
-            n_steps = int(srv.get(cfg.tags["res_nsteps"].format(i=tank.index)))
-            last = max(n_steps - 1, 0)
-        except (RuntimeError, TypeError, ValueError, KeyError):
-            # Some IPM versions expose only the final state at index 0.
-            last = 0
+    for tank in _tanks_in_model(cfg):
+        # Some IPM versions expose only the final state at index 0, so the
+        # fallback is legitimate — but on a version that returns a time
+        # series, index 0 is the FIRST step and every realization would
+        # report ~0 cumulative oil as a successful run. Say so, loudly.
+        template = cfg.tags.get("res_nsteps")
+        nsteps_tag = template.format(i=tank.index) if template else None
+        last = 0
+        if nsteps_tag is None:
+            _warn_once(
+                "res_nsteps/missing",
+                "tags['res_nsteps'] is not configured - reading prediction results "
+                "at index 0. If this IPM version returns a time series, that is the "
+                "first step and cumulative oil will read as ~0 for every "
+                "realization.",
+            )
+        else:
+            try:
+                last = max(int(srv.get(nsteps_tag)) - 1, 0)
+            except (RuntimeError, TypeError, ValueError):
+                _warn_once(
+                    f"res_nsteps/{nsteps_tag}",
+                    "cannot read step count %s - falling back to prediction results "
+                    "index 0. If this IPM version returns a time series, that is the "
+                    "first step and cumulative oil will read as ~0 for every "
+                    "realization. Check res_nsteps against MBAL's OpenServer "
+                    "browser.",
+                    nsteps_tag,
+                )
 
         cumulative_oil = srv.get(
             cfg.tags["res_cumoil"].format(i=tank.index, k=last, u=cfg.unit_cum)
@@ -849,21 +1689,42 @@ def read_results(srv: OpenServer, cfg: Config, row: pd.Series) -> dict[str, floa
         except (RuntimeError, KeyError):
             cumulative_water = float("nan")
 
+        cumulative_inj = float("nan")
+        if "res_cumwatinj" in cfg.tags:
+            try:
+                cumulative_inj = srv.get(
+                    cfg.tags["res_cumwatinj"].format(
+                        i=tank.index, k=last, u=cfg.unit_cum
+                    )
+                )
+            except (RuntimeError, KeyError):
+                cumulative_inj = float("nan")
+
         stoiip = float(row[f"stoiip_{tank.key}"])
         output[f"np_{tank.key}"] = cumulative_oil
         output[f"pres_{tank.key}"] = pressure
         output[f"wp_{tank.key}"] = cumulative_water
+        output[f"wi_{tank.key}"] = cumulative_inj
         if stoiip == 0.0 or not math.isfinite(stoiip):
             output[f"rf_{tank.key}"] = float("nan")
         else:
             output[f"rf_{tank.key}"] = cumulative_oil / stoiip
 
-    output["np_total"] = sum(output[f"np_{tank.key}"] for tank in cfg.tanks)
-    stoiip_total = float(row["stoiip_total"])
-    if stoiip_total == 0.0 or not math.isfinite(stoiip_total):
+    modelled = _tanks_in_model(cfg)
+    output["np_total"] = sum(output[f"np_{tank.key}"] for tank in modelled)
+    inj_values = [output[f"wi_{tank.key}"] for tank in modelled]
+    if inj_values and all(math.isfinite(value) for value in inj_values):
+        output["wi_total"] = sum(inj_values)
+    else:
+        output["wi_total"] = float("nan")
+    if "stoiip_in_model" in row.index:
+        stoiip_for_rf = float(row["stoiip_in_model"])
+    else:
+        stoiip_for_rf = sum(float(row[f"stoiip_{tank.key}"]) for tank in modelled)
+    if stoiip_for_rf == 0.0 or not math.isfinite(stoiip_for_rf):
         output["rf_total"] = float("nan")
     else:
-        output["rf_total"] = output["np_total"] / stoiip_total
+        output["rf_total"] = output["np_total"] / stoiip_for_rf
     return output
 
 
@@ -872,9 +1733,10 @@ def new_result_record(row: pd.Series, cfg: Config) -> dict[str, object]:
     record: dict[str, object] = row.to_dict()
     record["realization"] = int(row["realization"])
     for tank in cfg.tanks:
-        for prefix in ("np", "pres", "wp", "rf"):
+        for prefix in ("np", "pres", "wp", "wi", "rf"):
             record[f"{prefix}_{tank.key}"] = float("nan")
     record["np_total"] = float("nan")
+    record["wi_total"] = float("nan")
     record["rf_total"] = float("nan")
     record["status"] = "not run"
     record["runtime_s"] = float("nan")
@@ -884,6 +1746,24 @@ def new_result_record(row: pd.Series, cfg: Config) -> dict[str, object]:
 def _input_columns(cfg: Config) -> list[str]:
     columns = [f"stoiip_{tank.key}" for tank in cfg.tanks]
     columns.append("stoiip_total")
+    kind = cfg.volume_model.kind.lower()
+    if kind == "fmu_residual":
+        columns.append("field_scale")
+        columns.extend(f"official_{tank.key}" for tank in cfg.tanks)
+        columns.extend(f"residual_{tank.key}" for tank in cfg.tanks)
+    elif kind == "connected_volume":
+        if cfg.volume_model.field_scale is not None:
+            columns.append("field_scale")
+        columns.extend(f"official_{tank.key}" for tank in cfg.tanks)
+        columns.extend(f"residual_{tank.key}" for tank in cfg.tanks)
+        columns.extend(f"connected_{tank.key}" for tank in cfg.tanks)
+        columns.extend(f"connect_frac_{tank.key}" for tank in cfg.tanks)
+        if _tanks_with_role(cfg, "base"):
+            columns.append("stoiip_base")
+        if _tanks_with_role(cfg, "upside"):
+            columns.append("stoiip_upside")
+        if _tanks_in_model(cfg):
+            columns.append("stoiip_in_model")
     columns.extend(
         f"aq_mult_{tank.key}"
         for tank in cfg.tanks
@@ -894,8 +1774,10 @@ def _input_columns(cfg: Config) -> list[str]:
         for tank in cfg.tanks
         if tank.aquifer_volume is not None
     )
-    if cfg.gas_lift_values:
-        columns.extend(["base_realization", "gas_lift_rate"])
+    factors = _sensitivity_factors(cfg)
+    if factors:
+        columns.append("base_realization")
+        columns.extend(name for name, _values in factors)
     return columns
 
 
@@ -1142,6 +2024,10 @@ def _summary_columns(
         (f"stoiip_{tank.key}", f"{tank.name} STOIIP [{cfg.unit_stoiip}]")
         for tank in cfg.tanks
     )
+    if "stoiip_base" in df.columns:
+        columns.append(("stoiip_base", f"Base connected STOIIP [{cfg.unit_stoiip}]"))
+    if "stoiip_upside" in df.columns:
+        columns.append(("stoiip_upside", f"Upside-sand STOIIP [{cfg.unit_stoiip}]"))
     columns.append(("stoiip_total", f"Field STOIIP [{cfg.unit_stoiip}]"))
 
     if not include_prediction_results:
@@ -1151,6 +2037,7 @@ def _summary_columns(
         ("np", "cumulative oil", cfg.unit_cum),
         ("pres", "pressure", cfg.unit_press),
         ("wp", "cumulative water", cfg.unit_cum),
+        ("wi", "cumulative water injected", cfg.unit_cum),
         ("rf", "recovery factor", "fraction"),
     ):
         columns.extend(
@@ -1223,20 +2110,76 @@ def _plot_tank_metric(
 
 def _summarize_gas_lift(df: pd.DataFrame, cfg: Config) -> None:
     """Write and plot field-oil sensitivity versus deterministic gas-lift rate."""
-    if "gas_lift_rate" not in df.columns or "np_total" not in df.columns:
+    _summarize_operational_sweep(
+        df,
+        cfg,
+        group_columns=("gas_lift_rate",),
+        filename="gas_lift_sensitivity",
+        x_column="gas_lift_rate",
+        x_label="Gas lift rate [current MBAL model units]",
+        title="Gas-lift sensitivity",
+    )
+
+
+def _summarize_water_inj(df: pd.DataFrame, cfg: Config) -> None:
+    """Write and plot field-oil sensitivity versus injector rate and/or BHP."""
+    group_columns = tuple(
+        name
+        for name in ("water_inj_rate", "water_inj_bhp")
+        if name in df.columns
+    )
+    if not group_columns:
+        return
+    x_column = "water_inj_rate" if "water_inj_rate" in group_columns else "water_inj_bhp"
+    if x_column == "water_inj_rate":
+        x_label = "Water injection rate [current MBAL model units]"
+    else:
+        x_label = "Injector BHP [current MBAL model units]"
+    _summarize_operational_sweep(
+        df,
+        cfg,
+        group_columns=group_columns,
+        filename="water_inj_sensitivity",
+        x_column=x_column,
+        x_label=x_label,
+        title="Water-injection sensitivity",
+        series_column="water_inj_bhp" if len(group_columns) == 2 else None,
+    )
+
+
+def _summarize_operational_sweep(
+    df: pd.DataFrame,
+    cfg: Config,
+    *,
+    group_columns: tuple[str, ...],
+    filename: str,
+    x_column: str,
+    x_label: str,
+    title: str,
+    series_column: str | None = None,
+) -> None:
+    if x_column not in df.columns or "np_total" not in df.columns:
+        return
+    missing = [column for column in group_columns if column not in df.columns]
+    if missing:
         return
     successful = df[df["status"] == "ok"] if "status" in df.columns else df
     if successful.empty:
         return
 
     rows = []
-    for gas_lift_rate, group in successful.groupby("gas_lift_rate", sort=True):
+    for keys, group in successful.groupby(list(group_columns), sort=True):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
         stats = percentiles(
             group["np_total"].to_numpy(dtype=float), extra=cfg.extra_percentiles
         )
-        rows.append({"gas_lift_rate": gas_lift_rate, **stats, "n": len(group)})
+        record = {name: value for name, value in zip(group_columns, keys)}
+        record.update(stats)
+        record["n"] = len(group)
+        rows.append(record)
     sensitivity = pd.DataFrame(rows)
-    path = os.path.join(cfg.out_dir, "gas_lift_sensitivity.csv")
+    path = os.path.join(cfg.out_dir, f"{filename}.csv")
     sensitivity.to_csv(path, index=False)
     LOG.info("wrote %s", path)
 
@@ -1249,17 +2192,28 @@ def _summarize_gas_lift(df: pd.DataFrame, cfg: Config) -> None:
         return
 
     figure, axes = plt.subplots(figsize=(7, 4))
-    x = sensitivity["gas_lift_rate"].to_numpy(dtype=float)
-    for column in ("P90", "P50", "P10", "mean"):
-        if column in sensitivity.columns:
-            axes.plot(x, sensitivity[column], marker="o", label=column)
-    axes.set_xlabel("Gas lift rate [current MBAL model units]")
+    if series_column and series_column in sensitivity.columns:
+        for series_value, series in sensitivity.groupby(series_column, sort=True):
+            ordered = series.sort_values(x_column)
+            axes.plot(
+                ordered[x_column].to_numpy(dtype=float),
+                ordered["P50"].to_numpy(dtype=float),
+                marker="o",
+                label=f"P50 @ {series_column}={series_value:g}",
+            )
+    else:
+        ordered = sensitivity.sort_values(x_column)
+        x = ordered[x_column].to_numpy(dtype=float)
+        for column in ("P90", "P50", "P10", "mean"):
+            if column in ordered.columns:
+                axes.plot(x, ordered[column], marker="o", label=column)
+    axes.set_xlabel(x_label)
     axes.set_ylabel(f"Field cumulative oil [{cfg.unit_cum}]")
-    axes.set_title("Gas-lift sensitivity")
+    axes.set_title(title)
     axes.grid(alpha=0.3)
     axes.legend()
     figure.tight_layout()
-    plot_path = os.path.join(cfg.out_dir, "gas_lift_sensitivity.png")
+    plot_path = os.path.join(cfg.out_dir, f"{filename}.png")
     figure.savefig(plot_path, dpi=130)
     plt.close(figure)
     LOG.info("wrote %s", plot_path)
@@ -1282,7 +2236,13 @@ def _plot_field_total_stoiip(df: pd.DataFrame, cfg: Config) -> None:
 
     figure, axes = plt.subplots(1, 2, figsize=(11, 4))
     axes[0].hist(values, bins=30, color="steelblue", alpha=0.8)
-    axes[0].set_title("Field STOIIP (sum of independent tanks)")
+    kind = cfg.volume_model.kind.lower()
+    if kind == "connected_volume":
+        axes[0].set_title("Field STOIIP (connected volume, incl. optional upside)")
+    elif kind == "fmu_residual":
+        axes[0].set_title("Field STOIIP (official × shared scale × residual)")
+    else:
+        axes[0].set_title("Field STOIIP (sum of independent tanks)")
     axes[0].set_xlabel(cfg.unit_stoiip)
     axes[0].set_ylabel("count")
     ordered = np.sort(values)
@@ -1313,15 +2273,18 @@ def summarize(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     LOG.info("%d successful / %d total (%d failed or incomplete)", n_ok, n_all, n_fail)
     print(f"\n{n_ok} successful realizations of {n_all}\n")
 
-    gas_lift_sweep = "gas_lift_rate" in df.columns and bool(cfg.gas_lift_values)
-    # Also treat presence of gas_lift_rate column from prior runs as sweep mode.
-    if "gas_lift_rate" in df.columns and "base_realization" in df.columns:
-        gas_lift_sweep = True
+    operational_sweep = bool(_sensitivity_factors(cfg))
+    # Treat leftover sweep columns from a prior CSV as sweep mode.
+    if "base_realization" in df.columns and any(
+        column in df.columns
+        for column in ("gas_lift_rate", "water_inj_rate", "water_inj_bhp")
+    ):
+        operational_sweep = True
 
-    if gas_lift_sweep:
-        # Geological inputs are repeated once per lift setting. Summarize each
-        # base realization once, and leave prediction metrics to the
-        # per-rate gas_lift_sensitivity.csv table.
+    if operational_sweep:
+        # Volume inputs are repeated once per operational setting. Summarize
+        # each volume realization once; prediction metrics go to the
+        # per-setting sensitivity tables.
         if "base_realization" in df.columns:
             summary_source = df.drop_duplicates("base_realization", keep="first")
         else:
@@ -1333,7 +2296,7 @@ def summarize(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     for column, label in _summary_columns(
         cfg,
         summary_source,
-        include_prediction_results=not gas_lift_sweep,
+        include_prediction_results=not operational_sweep,
     ):
         if column not in summary_source.columns:
             continue
@@ -1363,7 +2326,12 @@ def summarize(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         "seed": cfg.seed,
         "sampling": cfg.sampling,
         "n_tanks": len(cfg.tanks),
+        "volume_model": cfg.volume_model.kind,
+        "official_as": cfg.volume_model.official_as,
         "gas_lift_values": list(cfg.gas_lift_values),
+        "water_inj_rate_values": list(cfg.water_inj_rate_values),
+        "water_inj_bhp_values": list(cfg.water_inj_bhp_values),
+        "water_inj_control": cfg.water_inj_control,
     }
     meta_path = os.path.join(cfg.out_dir, "run_metadata.csv")
     pd.DataFrame([meta]).to_csv(meta_path, index=False)
@@ -1373,8 +2341,10 @@ def summarize(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         import matplotlib  # noqa: F401
     except ImportError:
         LOG.warning("matplotlib not installed - skipping plots")
-        if gas_lift_sweep:
+        if operational_sweep:
             _summarize_gas_lift(df, cfg)
+            _summarize_water_inj(df, cfg)
+            _summarize_decision(df, cfg)
         return summary
 
     _plot_tank_metric(
@@ -1386,7 +2356,7 @@ def summarize(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         filename="stoiip_per_tank.png",
     )
     _plot_field_total_stoiip(summary_source, cfg)
-    if not gas_lift_sweep:
+    if not operational_sweep:
         _plot_tank_metric(
             successful,
             cfg,
@@ -1412,7 +2382,153 @@ def summarize(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
             filename="pressure_per_tank.png",
         )
     _summarize_gas_lift(df, cfg)
+    _summarize_water_inj(df, cfg)
+    _summarize_decision(df, cfg)
     return summary
+
+
+def _volume_source(samples: pd.DataFrame) -> pd.DataFrame:
+    if "base_realization" in samples.columns:
+        return samples.drop_duplicates("base_realization", keep="first")
+    return samples
+
+
+def _print_volume_diagnostics(samples: pd.DataFrame, cfg: Config) -> None:
+    """Print official vs sampled STOIIP so a high-side prior is visible."""
+    kind = cfg.volume_model.kind.lower()
+    if kind not in {"fmu_residual", "connected_volume"}:
+        return
+    source = _volume_source(samples)
+    print(f"\nVolume model: {kind} (official_as={cfg.volume_model.official_as})")
+    print("Official numbers are working mapped cases, not the mean.")
+    rows = []
+    for tank in cfg.tanks:
+        column = f"stoiip_{tank.key}"
+        if column not in source.columns or tank.official_stoiip is None:
+            continue
+        stats = percentiles(source[column].to_numpy(), extra=cfg.extra_percentiles)
+        official = float(tank.official_stoiip)
+        p_conn = float("nan")
+        if f"connected_{tank.key}" in source.columns:
+            p_conn = float(source[f"connected_{tank.key}"].mean())
+        rows.append(
+            {
+                "tank": tank.key,
+                "role": tank.role,
+                "official": official,
+                "P_connect": p_conn,
+                "P90": stats["P90"],
+                "P50": stats["P50"],
+                "P10": stats["P10"],
+                "mean": stats["mean"],
+                "mean/official": stats["mean"] / official if official else float("nan"),
+            }
+        )
+    for label, column, official in (
+        (
+            "base",
+            "stoiip_base",
+            sum(
+                float(tank.official_stoiip)
+                for tank in _tanks_with_role(cfg, "base")
+                if tank.official_stoiip is not None
+            ),
+        ),
+        (
+            "upside",
+            "stoiip_upside",
+            sum(
+                float(tank.official_stoiip)
+                for tank in _tanks_with_role(cfg, "upside")
+                if tank.official_stoiip is not None
+            ),
+        ),
+        (
+            "field",
+            "stoiip_total",
+            sum(
+                float(tank.official_stoiip)
+                for tank in cfg.tanks
+                if tank.official_stoiip is not None
+            ),
+        ),
+    ):
+        if column not in source.columns:
+            continue
+        stats = percentiles(source[column].to_numpy(), extra=cfg.extra_percentiles)
+        rows.append(
+            {
+                "tank": label,
+                "role": "",
+                "official": official,
+                "P_connect": float("nan"),
+                "P90": stats["P90"],
+                "P50": stats["P50"],
+                "P10": stats["P10"],
+                "mean": stats["mean"],
+                "mean/official": stats["mean"] / official if official else float("nan"),
+            }
+        )
+    if rows:
+        table = pd.DataFrame(rows)
+        print(table.round(3).to_string(index=False))
+        base = next((row for row in rows if row["tank"] == "base"), None)
+        if base and base["mean"] > base["official"] * 1.01:
+            print(
+                "WARNING: sampled base mean exceeds official base total — "
+                "the prior is optimistic on expected connected STOIIP."
+            )
+
+
+def _summarize_decision(df: pd.DataFrame, cfg: Config) -> None:
+    """Write a one-page decision table: base vs upside vs total STOIIP."""
+    if cfg.volume_model.kind.lower() != "connected_volume":
+        return
+    source = _volume_source(df)
+    rows = []
+    scopes = [
+        ("base (sidetrack without deeper sand)", "stoiip_base"),
+        ("upside sand only", "stoiip_upside"),
+        ("total including upside sand", "stoiip_total"),
+    ]
+    for label, column in scopes:
+        if column not in source.columns:
+            continue
+        stats = percentiles(source[column].to_numpy(), extra=cfg.extra_percentiles)
+        rows.append({"scope": label, **{k: round(v, 3) for k, v in stats.items()}})
+    for tank in cfg.tanks:
+        conn_col = f"connected_{tank.key}"
+        if conn_col not in source.columns:
+            continue
+        rows.append(
+            {
+                "scope": f"P(connected {tank.key})",
+                "mean": round(float(source[conn_col].mean()), 3),
+            }
+        )
+    # The joint number is the one that shows whether the shared barrier was
+    # modelled as shared: independent draws make this far too small.
+    base_connected = [
+        f"connected_{tank.key}"
+        for tank in _tanks_with_role(cfg, "base")
+        if f"connected_{tank.key}" in source.columns
+    ]
+    if len(base_connected) > 1:
+        isolated = (source[base_connected].to_numpy(dtype=float) < 0.5).all(axis=1)
+        rows.append(
+            {
+                "scope": "P(all base tanks isolated)",
+                "mean": round(float(isolated.mean()), 3),
+            }
+        )
+    if not rows:
+        return
+    table = pd.DataFrame(rows)
+    path = os.path.join(cfg.out_dir, "decision_volume_summary.csv")
+    table.to_csv(path, index=False)
+    LOG.info("wrote %s", path)
+    print("\nDecision volume table (working official numbers):")
+    print(table.to_string(index=False))
 
 
 # -----------------------------------------------------------------------------
@@ -1438,11 +2554,7 @@ def setup_logging(level: str = "INFO", *, log_file: str | None = None) -> None:
         root.addHandler(file_handler)
 
 
-def build_arg_parser(
-    description: str,
-    *,
-    gas_lift_cli: bool = False,
-) -> argparse.ArgumentParser:
+def build_arg_parser(description: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=description,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1476,14 +2588,35 @@ def build_arg_parser(
         action="store_true",
         help="abort the run on the first OpenServer failure",
     )
-    if gas_lift_cli:
-        parser.add_argument(
-            "--gas-lift-values",
-            help=(
-                "comma-separated deterministic gas-lift sensitivity values in the "
-                "current MBAL model units, e.g. 0,0.5,1.0,1.5"
-            ),
-        )
+    parser.add_argument(
+        "--gas-lift-values",
+        help=(
+            "comma-separated gas-lift sensitivity values in the current MBAL "
+            "model units, e.g. 0,0.5,1.0,1.5"
+        ),
+    )
+    parser.add_argument(
+        "--water-inj-rate-values",
+        help=(
+            "comma-separated water-injection rate sensitivity values in the "
+            "current MBAL model units, e.g. 0,300,600"
+        ),
+    )
+    parser.add_argument(
+        "--water-inj-bhp-values",
+        help=(
+            "comma-separated injector BHP / BHP-limit sensitivity values in "
+            "the current MBAL model units, e.g. 250,300"
+        ),
+    )
+    parser.add_argument(
+        "--water-inj-control",
+        choices=("rate", "bhp", "rate_with_bhp_limit"),
+        help=(
+            "how the injector is controlled: fixed rate, fixed BHP "
+            "(PERFORMTYPE=CFBHP), or rate with a BHP limit"
+        ),
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -1502,12 +2635,7 @@ def build_arg_parser(
     return parser
 
 
-def apply_cli_overrides(
-    cfg: Config,
-    args: argparse.Namespace,
-    *,
-    gas_lift_cli: bool = False,
-) -> Config:
+def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> Config:
     updates: dict[str, Any] = {}
     if args.n is not None:
         updates["n_realizations"] = args.n
@@ -1527,19 +2655,33 @@ def apply_cli_overrides(
         updates["reconnect_every"] = args.reconnect_every
     if args.stop_on_error:
         updates["stop_on_error"] = True
-    if gas_lift_cli and getattr(args, "gas_lift_values", None):
+    if getattr(args, "gas_lift_values", None):
         try:
-            updates["gas_lift_values"] = tuple(
-                float(value.strip())
-                for value in args.gas_lift_values.split(",")
-                if value.strip()
+            updates["gas_lift_values"] = _parse_float_tuple(
+                args.gas_lift_values, "--gas-lift-values"
             )
         except ValueError as error:
             raise SystemExit(f"invalid --gas-lift-values: {error}") from error
+    if getattr(args, "water_inj_rate_values", None):
+        try:
+            updates["water_inj_rate_values"] = _parse_float_tuple(
+                args.water_inj_rate_values, "--water-inj-rate-values"
+            )
+        except ValueError as error:
+            raise SystemExit(f"invalid --water-inj-rate-values: {error}") from error
+    if getattr(args, "water_inj_bhp_values", None):
+        try:
+            updates["water_inj_bhp_values"] = _parse_float_tuple(
+                args.water_inj_bhp_values, "--water-inj-bhp-values"
+            )
+        except ValueError as error:
+            raise SystemExit(f"invalid --water-inj-bhp-values: {error}") from error
+    if getattr(args, "water_inj_control", None):
+        updates["water_inj_control"] = args.water_inj_control
     return replace(cfg, **updates) if updates else cfg
 
 
-def write_example_config(path: str, *, gas_lift: bool = False) -> None:
+def write_example_config(path: str) -> None:
     try:
         import yaml
     except ImportError as error:
@@ -1547,9 +2689,10 @@ def write_example_config(path: str, *, gas_lift: bool = False) -> None:
             "PyYAML is required to write example config; pip install pyyaml"
         ) from error
 
-    cfg = default_config(gas_lift=gas_lift)
-    if gas_lift:
-        cfg = replace(cfg, gas_lift_values=(0.0, 0.5, 1.0, 1.5))
+    cfg = default_config(
+        water_inj_rate_values=(0.0, 300.0, 600.0),
+        water_inj_bhp_values=(250.0, 300.0),
+    )
     data = config_to_dict(cfg)
     path_obj = Path(path)
     path_obj.parent.mkdir(parents=True, exist_ok=True)
@@ -1561,25 +2704,24 @@ def write_example_config(path: str, *, gas_lift: bool = False) -> None:
 def main(
     argv: list[str] | None = None,
     *,
-    gas_lift: bool = False,
     description: str | None = None,
 ) -> int:
-    """CLI entry used by both thin wrapper scripts."""
+    """CLI entry: three tanks, optional gas-lift and water-injection sweeps."""
     desc = description or (
         "Probabilistic MBAL via OpenServer "
-        + ("(gas-lift sensitivity)" if gas_lift else "(independent per-tank sampling)")
+        "(three-tank connected volume; optional gas-lift and water injection)"
     )
-    parser = build_arg_parser(desc, gas_lift_cli=gas_lift)
+    parser = build_arg_parser(desc)
     args = parser.parse_args(argv)
 
     if args.write_example_config:
-        write_example_config(args.write_example_config, gas_lift=gas_lift)
+        write_example_config(args.write_example_config)
         return 0
 
-    cfg = default_config(gas_lift=gas_lift)
+    cfg = default_config()
     if args.config:
         cfg = load_config_yaml(args.config, base=cfg)
-    cfg = apply_cli_overrides(cfg, args, gas_lift_cli=gas_lift)
+    cfg = apply_cli_overrides(cfg, args)
     validate_config(cfg)
 
     log_path = os.path.join(cfg.out_dir, "mbal_run.log")
@@ -1617,12 +2759,25 @@ def main(
 
     stoiip_columns = [f"stoiip_{tank.key}" for tank in cfg.tanks]
     if len(stoiip_columns) > 1:
-        print(
-            "\nSample STOIIP rank correlation "
-            "(independent target: approximately zero):"
-        )
+        kind = cfg.volume_model.kind.lower()
+        if kind == "connected_volume":
+            print(
+                "\nSample STOIIP rank correlation "
+                "(base tanks share field_scale; upside sand is independent):"
+            )
+        elif kind == "fmu_residual":
+            print(
+                "\nSample STOIIP rank correlation "
+                "(fmu_residual target: positive via shared field_scale):"
+            )
+        else:
+            print(
+                "\nSample STOIIP rank correlation "
+                "(independent target: approximately zero):"
+            )
         rank_correlation = samples[stoiip_columns].rank().corr()
         print(rank_correlation.round(3).to_string())
+    _print_volume_diagnostics(samples, cfg)
 
     if args.dry_run:
         path = os.path.join(cfg.out_dir, "samples_dry_run.csv")
@@ -1642,9 +2797,8 @@ def main(
     return 0
 
 
-# Back-compat module-level defaults used by older tests/scripts.
-TAGS = dict(DEFAULT_INDEX_TAGS)
-CFG = default_config(gas_lift=False)
+TAGS = dict(DEFAULT_NAME_TAGS)
+CFG = default_config()
 
 __all__ = [
     "CFG",
@@ -1652,10 +2806,12 @@ __all__ = [
     "DEFAULT_NAME_TAGS",
     "TAGS",
     "Config",
+    "Connectivity",
     "Distribution",
     "OpenServer",
     "SetServer",
     "TankConfig",
+    "VolumeModel",
     "apply_realization",
     "build_sample_table",
     "config_from_dict",

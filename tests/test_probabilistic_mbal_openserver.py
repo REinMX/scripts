@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
 
 import mbal_core as core
-import probabilistic_mbal_openserver as mbal
+import mbal_core as mbal
 
 
 def uniform(low: float, high: float) -> mbal.Distribution:
@@ -255,16 +257,16 @@ def test_yaml_config_roundtrip(tmp_path) -> None:
     mbal.main(["--write-example-config", str(path)])
     cfg = mbal.load_config_yaml(path)
     mbal.validate_config(cfg)
-    assert len(cfg.tanks) == 2
-    assert cfg.tag_mode == "index"
+    assert len(cfg.tanks) == 3
+    assert cfg.tag_mode == "name"
+    assert cfg.volume_model.kind == "connected_volume"
     samples = mbal.build_sample_table(
-        mbal.Config(
-            tanks=cfg.tanks,
+        replace(
+            cfg,
             n_realizations=5,
-            seed=cfg.seed,
-            sampling=cfg.sampling,
-            tags=cfg.tags,
-            tag_mode=cfg.tag_mode,
+            water_inj_rate_values=(),
+            water_inj_bhp_values=(),
+            gas_lift_values=(),
         )
     )
     assert len(samples) == 5
@@ -278,3 +280,52 @@ def test_dry_run_cli(tmp_path) -> None:
     assert code == 0
     assert (out / "samples_dry_run.csv").exists()
     assert (out / "summary_percentiles.csv").exists()
+
+
+def test_missing_step_count_warns_before_reading_results_index_zero(caplog) -> None:
+    """Index 0 is the FIRST step wherever MBAL returns a time series.
+
+    Falling back to it silently would report ~0 cumulative oil for every
+    realization while still marking each run 'ok'.
+    """
+    cfg = mbal.Config(tanks=(tank("A", 0, fixed(10.0)),))
+
+    class StubServer:
+        def __init__(self) -> None:
+            self.reads: list[str] = []
+
+        def get(self, tag: str) -> float:
+            self.reads.append(tag)
+            if "COUNT" in tag:
+                raise RuntimeError("OpenServer error 1 on DoGet")
+            return 1.0
+
+    core._WARNED_ONCE.clear()
+    server = StubServer()
+    row = pd.Series({"stoiip_A": 10.0})
+
+    with caplog.at_level("WARNING", logger="mbal"):
+        results = mbal.read_results(server, cfg, row)
+
+    assert results["np_A"] == 1.0
+    assert any("index 0" in message for message in caplog.messages)
+    assert any("[0][0]" in read for read in server.reads)
+
+    # Once per run, not once per realization.
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="mbal"):
+        mbal.read_results(server, cfg, row)
+    assert not caplog.messages
+
+
+def test_readable_step_count_reads_the_last_step_without_warning(caplog) -> None:
+    cfg = mbal.Config(tanks=(tank("A", 0, fixed(10.0)),))
+
+    class StubServer:
+        def get(self, tag: str) -> float:
+            return 25.0 if "COUNT" in tag else 1.0
+
+    core._WARNED_ONCE.clear()
+    with caplog.at_level("WARNING", logger="mbal"):
+        mbal.read_results(StubServer(), cfg, pd.Series({"stoiip_A": 10.0}))
+    assert not caplog.messages

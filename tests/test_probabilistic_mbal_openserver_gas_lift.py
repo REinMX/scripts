@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 import mbal_core as core
-import probabilistic_mbal_openserver_gas_lift as mbal
+import mbal_core as mbal
 
 
 def fixed(value: float) -> mbal.Distribution:
@@ -37,8 +37,18 @@ def tank(
 
 
 def name_cfg(**kwargs) -> mbal.Config:
-    """Config with name-based tags (gas-lift workflow defaults)."""
-    base = mbal.default_config(gas_lift=True)
+    """Name-based tags; independent tanks unless the test passes its own model."""
+    base = replace(
+        mbal.default_config(),
+        volume_model=mbal.VolumeModel(),
+        unit_stoiip="MMstb",
+        unit_cum="MMstb",
+        unit_press="psig",
+        tanks=(
+            tank("bottom", "REPLACE_WITH_BOTTOM_TANK_NAME", 0, fixed(20.0)),
+            tank("top", "REPLACE_WITH_TOP_TANK_NAME", 1, fixed(40.0)),
+        ),
+    )
     return replace(base, **kwargs) if kwargs else base
 
 
@@ -163,11 +173,18 @@ def test_main_summary_does_not_pool_results_across_gas_lift_rates(tmp_path) -> N
 def test_yaml_gas_lift_config(tmp_path) -> None:
     path = tmp_path / "gl.yaml"
     mbal.main(["--write-example-config", str(path)])
-    cfg = mbal.load_config_yaml(path, base=mbal.default_config(gas_lift=True))
+    cfg = mbal.load_config_yaml(path, base=mbal.default_config())
     mbal.validate_config(cfg)
     assert cfg.tag_mode == "name"
-    assert cfg.gas_lift_values
+    assert len(cfg.tanks) == 3
+    assert cfg.tanks[2].role == "upside"
     samples = mbal.build_sample_table(
-        replace(cfg, n_realizations=4, gas_lift_values=(0.0, 1.0))
+        replace(
+            cfg,
+            n_realizations=4,
+            gas_lift_values=(0.0, 1.0),
+            water_inj_rate_values=(),
+            water_inj_bhp_values=(),
+        )
     )
     assert len(samples) == 8
