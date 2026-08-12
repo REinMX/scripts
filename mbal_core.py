@@ -4,8 +4,8 @@ Shared core for probabilistic MBAL via Petroleum Experts OpenServer.
 Used by the single CLI: mbal.py
 
 Supports:
-  - independent per-tank STOIIP, FMU/ERT residual multipliers, or
-    connected-volume (connectivity + optional upside tank)
+  - connected-volume oil in place: official x connectivity x residual,
+    with correlated connectivity groups and an optional upside tank
   - optional aquifer parameters
   - deterministic operational sweeps (gas lift, water-injection rate, BHP)
   - YAML config, resume-safe CSV, tag validation, P90/P50/P10 summaries
@@ -55,20 +55,10 @@ def _warn_once(key: str, message: str, *args: object) -> None:
 DistributionKind = Literal["fixed", "uniform", "triangular", "lognormal"]
 SamplingMethod = Literal["lhs", "mc"]
 TagMode = Literal["index", "name"]
-VolumeModelKind = Literal["independent", "fmu_residual", "connected_volume"]
-OfficialAnchor = Literal["none", "p50", "p40", "p30"]
+VolumeModelKind = Literal["connected_volume"]
 WaterInjControl = Literal["rate", "bhp", "rate_with_bhp_limit"]
 TankRole = Literal["base", "upside"]
 ConnectivityKind = Literal["two_section", "optional"]
-
-# O&G percentile label -> statistical percentile (low tail = P90).
-_OG_TO_STAT: dict[str, float] = {
-    "p90": 10.0,
-    "p50": 50.0,
-    "p40": 60.0,
-    "p30": 70.0,
-    "p10": 90.0,
-}
 
 
 @dataclass(frozen=True)
@@ -140,28 +130,17 @@ class Connectivity:
 
 @dataclass(frozen=True)
 class VolumeModel:
-    """Oil-in-place uncertainty model for a dynamic (MBAL) tank study.
+    """Connected-volume oil in place for a dynamic (MBAL) tank study.
 
-    independent
-        Each tank has its own STOIIP distribution. Field total is a sum.
-        Optimistic on the field low-case when tanks share Bo / mapping
-        error (false diversification).
+    Official numbers are mapped *connected-case* volumes, not the mean.
+    Discrete connectivity decides how much of that volume the well sees;
+    a residual multiplier sits on top:
 
-    fmu_residual
-        Official * shared field_scale * tank residual. Use when
-        connectivity is already decided and only residual volume remains.
+        STOIIP_i = official_i × connect_frac_i × residual_i
+                   × (field_scale if tank.role == base)
 
-    connected_volume
-        Official numbers are mapped *connected-case* volumes, not the
-        mean. Discrete connectivity decides how much of that volume the
-        well sees; a residual multiplier sits on top:
-
-            STOIIP_i = official_i × connect_frac_i × residual_i
-                       × (field_scale if tank.role == base)
-
-        connect_frac is 1 or isolated_fraction (two_section), or 1 or 0
-        (optional). Upside tanks are excluded from the base sum.
-        official_as is ignored — the mixture already puts official high.
+    connect_frac is 1 or isolated_fraction (two_section), or 1 or 0
+    (optional). Upside tanks are excluded from the base sum.
 
     connectivity_correlation
         Correlation between the connectivity draws of tanks that share a
@@ -169,12 +148,11 @@ class VolumeModel:
         draws independent; 1 means one barrier decides them together, so
         P(all connected) = min(p_connected) rather than the product. Each
         tank's own p_connected is preserved exactly at every value.
-        Independent connectivity is false diversification in the same way
-        volume_model.kind 'independent' is: it lifts the field low case.
+        Independent draws are false diversification: they lift the field
+        low case and invent an "exactly one sand connects" outcome.
     """
 
-    kind: str = "independent"
-    official_as: str = "none"
+    kind: str = "connected_volume"
     field_scale: Distribution | None = None
     residual: Distribution | None = None
     max_multiplier: float | None = None
@@ -183,7 +161,6 @@ class VolumeModel:
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "kind": self.kind,
-            "official_as": self.official_as,
             "connectivity_correlation": self.connectivity_correlation,
         }
         if self.field_scale is not None:
@@ -202,32 +179,13 @@ class TankConfig:
     key: str
     name: str
     index: int
-    stoiip: Distribution | None = None
+    official_stoiip: float | None = None
     aquifer_multiplier: Distribution | None = None
     aquifer_volume: Distribution | None = None
-    official_stoiip: float | None = None
     residual: Distribution | None = None
     role: str = "base"
     in_model: bool = True
     connectivity: Connectivity | None = None
-
-
-def _default_index_tanks() -> tuple[TankConfig, ...]:
-    """Example priors for index-based OpenServer tags."""
-    return (
-        TankConfig(
-            key="A",
-            name="Tank A",
-            index=0,
-            stoiip=Distribution(kind="lognormal", p90=20.0, p10=70.0),
-        ),
-        TankConfig(
-            key="B",
-            name="Tank B",
-            index=1,
-            stoiip=Distribution(kind="triangular", low=15.0, mode=45.0, high=90.0),
-        ),
-    )
 
 
 def _default_exploration_tanks() -> tuple[TankConfig, ...]:
@@ -298,8 +256,6 @@ def _default_exploration_volume_model() -> VolumeModel:
     question (presence and charge), so it stays outside the group.
     """
     return VolumeModel(
-        kind="connected_volume",
-        official_as="none",
         field_scale=Distribution(kind="lognormal", p90=0.88, p10=1.10),
         connectivity_correlation=0.8,
     )
@@ -355,16 +311,20 @@ DEFAULT_NAME_TAGS: dict[str, str] = {
 class Config:
     # --- model -------------------------------------------------------------
     mbal_file: str = r"C:\Work\Models\two_tank_model.mbi"
-    tanks: tuple[TankConfig, ...] = field(default_factory=_default_index_tanks)
+    tanks: tuple[TankConfig, ...] = field(
+        default_factory=_default_exploration_tanks
+    )
     openserver_prog_id: str = "PX32.OpenServer.1"
-    unit_stoiip: str = "MMstb"
-    unit_press: str = "psig"
-    unit_cum: str = "MMstb"
-    tag_mode: str = "index"  # index | name
-    tags: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_INDEX_TAGS))
+    unit_stoiip: str = "MSm3"
+    unit_press: str = "bara"
+    unit_cum: str = "MSm3"
+    tag_mode: str = "name"  # index | name
+    tags: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_NAME_TAGS))
 
     # --- volume uncertainty -----------------------------------------------
-    volume_model: VolumeModel = field(default_factory=VolumeModel)
+    volume_model: VolumeModel = field(
+        default_factory=_default_exploration_volume_model
+    )
 
     # --- gas lift (optional) -----------------------------------------------
     gas_lift_well: str = "REPLACE_WITH_GAS_LIFT_WELL_NAME"
@@ -388,8 +348,8 @@ class Config:
     sampling: str = "lhs"  # lhs or mc
 
     # --- run control -------------------------------------------------------
-    out_csv: str = "mbal_mc_results.csv"
-    out_dir: str = "mbal_mc_output"
+    out_csv: str = "mbal_results.csv"
+    out_dir: str = "mbal_output"
     stop_on_error: bool = False
     validate_tags: bool = True
     reconnect_every: int = 0  # 0 = never reconnect; N = reopen model every N ok runs
@@ -406,23 +366,13 @@ def default_config(
 ) -> Config:
     """This well: three tanks, connected-volume prior.
 
-    Gas-lift and water-injection lists are empty unless the caller (YAML or
-    CLI) fills them. The same three tanks are used in every case.
+    Config() already carries the well. This only fills the optional sweep
+    lists, which are empty unless YAML or the CLI sets them.
     """
     return Config(
-        tanks=_default_exploration_tanks(),
-        tag_mode="name",
-        tags=dict(DEFAULT_NAME_TAGS),
-        unit_stoiip="MSm3",
-        unit_cum="MSm3",
-        unit_press="bara",
-        volume_model=_default_exploration_volume_model(),
-        out_csv="mbal_results.csv",
-        out_dir="mbal_output",
         gas_lift_values=gas_lift_values,
         water_inj_rate_values=water_inj_rate_values,
         water_inj_bhp_values=water_inj_bhp_values,
-        water_inj_control="rate_with_bhp_limit",
     )
 
 
@@ -460,9 +410,12 @@ def _parse_tank(raw: dict[str, Any], position: int) -> TankConfig:
     key = str(raw["key"])
     name = str(raw.get("name", key))
     index = int(raw.get("index", position))
-    stoiip = None
     if raw.get("stoiip") is not None:
-        stoiip = _parse_distribution(raw["stoiip"], f"tank {key} STOIIP")
+        raise ValueError(
+            f"tank {key}: per-tank 'stoiip' distributions are no longer "
+            "supported. Give official_stoiip plus connectivity instead - see "
+            "docs/oil-in-place.md"
+        )
     aquifer_multiplier = None
     if raw.get("aquifer_multiplier") is not None:
         aquifer_multiplier = _parse_distribution(
@@ -477,10 +430,8 @@ def _parse_tank(raw: dict[str, Any], position: int) -> TankConfig:
     if raw.get("residual") is not None:
         residual = _parse_distribution(raw["residual"], f"tank {key} residual")
     official = _optional_float(raw.get("official_stoiip"))
-    if stoiip is None and official is None:
-        raise ValueError(
-            f"tank[{position}] ({key}): provide stoiip or official_stoiip"
-        )
+    if official is None:
+        raise ValueError(f"tank[{position}] ({key}): missing official_stoiip")
     connectivity = None
     if raw.get("connectivity") is not None:
         connectivity = _parse_connectivity(
@@ -494,7 +445,6 @@ def _parse_tank(raw: dict[str, Any], position: int) -> TankConfig:
         key=key,
         name=name,
         index=index,
-        stoiip=stoiip,
         aquifer_multiplier=aquifer_multiplier,
         aquifer_volume=aquifer_volume,
         official_stoiip=official,
@@ -535,8 +485,7 @@ def _parse_volume_model(raw: Any) -> VolumeModel:
         residual = _parse_distribution(raw["residual"], "volume residual")
     correlation = raw.get("connectivity_correlation")
     return VolumeModel(
-        kind=str(raw.get("kind", "independent")).lower(),
-        official_as=str(raw.get("official_as", "none")).lower(),
+        kind=str(raw.get("kind", "connected_volume")).lower(),
         field_scale=field_scale,
         residual=residual,
         max_multiplier=_optional_float(raw.get("max_multiplier")),
@@ -688,8 +637,6 @@ def config_to_dict(cfg: Config) -> dict[str, Any]:
         }
         if tank.official_stoiip is not None:
             item["official_stoiip"] = tank.official_stoiip
-        if tank.stoiip is not None:
-            item["stoiip"] = tank.stoiip.to_dict()
         if tank.residual is not None:
             item["residual"] = tank.residual.to_dict()
         if tank.role != "base":
@@ -895,15 +842,11 @@ def _correlated_connectivity_groups(cfg: Config) -> tuple[str, ...]:
 def _validate_volume_model(cfg: Config) -> None:
     model = cfg.volume_model
     kind = model.kind.lower()
-    if kind not in {"independent", "fmu_residual", "connected_volume"}:
+    if kind != "connected_volume":
         raise ValueError(
-            "volume_model.kind must be 'independent', 'fmu_residual', "
-            "or 'connected_volume'"
-        )
-    anchor = model.official_as.lower()
-    if anchor not in {"none", "p50", "p40", "p30"}:
-        raise ValueError(
-            "volume_model.official_as must be one of: none, p50, p40, p30"
+            f"volume_model.kind must be 'connected_volume' (got {model.kind!r}). "
+            "The 'independent' and 'fmu_residual' models were removed - give "
+            "each tank official_stoiip plus connectivity instead"
         )
     if model.max_multiplier is not None and (
         not math.isfinite(model.max_multiplier) or model.max_multiplier <= 0.0
@@ -922,55 +865,12 @@ def _validate_volume_model(cfg: Config) -> None:
         if tank.role.lower() not in {"base", "upside"}:
             raise ValueError(f"tank {tank.key}: role must be 'base' or 'upside'")
 
-    if kind == "independent":
-        for tank in cfg.tanks:
-            if tank.stoiip is None:
-                raise ValueError(
-                    f"tank {tank.key}: independent volume model requires stoiip"
-                )
-            validate_distribution(tank.stoiip, f"tank {tank.key} STOIIP")
-        if len(cfg.tanks) > 1:
-            LOG.warning(
-                "Independent per-tank STOIIP treats tank volumes as uncorrelated. "
-                "That usually makes the field low-case (P90) too high. "
-                "Prefer volume_model.kind: connected_volume for this well."
-            )
-        return
-
-    if kind == "fmu_residual":
-        if model.field_scale is None:
-            raise ValueError("fmu_residual volume model requires field_scale")
-        validate_distribution(model.field_scale, "field_scale")
-        for tank in cfg.tanks:
-            if tank.official_stoiip is None or tank.official_stoiip <= 0.0:
-                raise ValueError(
-                    f"tank {tank.key}: fmu_residual requires official_stoiip > 0"
-                )
-            if tank.stoiip is not None:
-                raise ValueError(
-                    f"tank {tank.key}: use official_stoiip (not stoiip) "
-                    "with volume_model.kind: fmu_residual"
-                )
-            residual = _tank_residual(cfg, tank)
-            if residual is None:
-                raise ValueError(
-                    f"tank {tank.key}: fmu_residual requires a residual "
-                    "distribution (volume_model.residual or tank.residual)"
-                )
-            validate_distribution(residual, f"tank {tank.key} residual")
-        return
-
     if model.field_scale is not None:
         validate_distribution(model.field_scale, "field_scale")
     for tank in cfg.tanks:
         if tank.official_stoiip is None or tank.official_stoiip <= 0.0:
             raise ValueError(
                 f"tank {tank.key}: connected_volume requires official_stoiip > 0"
-            )
-        if tank.stoiip is not None:
-            raise ValueError(
-                f"tank {tank.key}: use official_stoiip (not stoiip) "
-                "with volume_model.kind: connected_volume"
             )
         if tank.connectivity is None:
             raise ValueError(
@@ -1250,59 +1150,22 @@ def _expand_sensitivity(samples: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     return out
 
 
-def _anchor_stat_percentile(official_as: str) -> float | None:
-    key = official_as.lower()
-    if key == "none":
-        return None
-    if key not in _OG_TO_STAT:
-        raise ValueError(f"unknown official_as {official_as!r}")
-    return _OG_TO_STAT[key]
-
-
-def _apply_volume_anchor(
-    multipliers: np.ndarray, official_as: str
-) -> np.ndarray:
-    """Rescale multipliers so official sits at the requested O&G percentile."""
-    stat = _anchor_stat_percentile(official_as)
-    if stat is None:
-        return multipliers
-    quantile = float(np.percentile(multipliers, stat))
-    if quantile <= 0.0 or not math.isfinite(quantile):
-        raise ValueError(
-            "cannot anchor official_as: multiplier quantile is not positive"
-        )
-    return multipliers / quantile
-
-
 def build_sample_table(cfg: Config) -> pd.DataFrame:
     """Sample tank-volume inputs, then expand operational sensitivities."""
     validate_config(cfg)
 
     distributions: list[Distribution] = []
     model = cfg.volume_model
-    kind = model.kind.lower()
     connect_draws = 0
-    if kind == "fmu_residual":
-        assert model.field_scale is not None
+    if model.field_scale is not None:
         distributions.append(model.field_scale)
-        for tank in cfg.tanks:
-            residual = _tank_residual(cfg, tank)
-            assert residual is not None
-            distributions.append(residual)
-    elif kind == "connected_volume":
-        if model.field_scale is not None:
-            distributions.append(model.field_scale)
-        for tank in cfg.tanks:
-            residual = _tank_residual(cfg, tank)
-            assert residual is not None
-            distributions.append(residual)
-            assert tank.connectivity is not None
-            if 0.0 < tank.connectivity.p_connected < 1.0:
-                connect_draws += 1
-    else:
-        for tank in cfg.tanks:
-            assert tank.stoiip is not None
-            distributions.append(tank.stoiip)
+    for tank in cfg.tanks:
+        residual = _tank_residual(cfg, tank)
+        assert residual is not None
+        distributions.append(residual)
+        assert tank.connectivity is not None
+        if 0.0 < tank.connectivity.p_connected < 1.0:
+            connect_draws += 1
     distributions.extend(
         tank.aquifer_multiplier
         for tank in cfg.tanks
@@ -1346,99 +1209,68 @@ def build_sample_table(cfg: Config) -> pd.DataFrame:
     }
     stoiip_columns: list[str] = []
 
-    if kind == "fmu_residual":
-        assert model.field_scale is not None
+    if model.field_scale is not None:
         field_scale = draw(model.field_scale)
         data["field_scale"] = field_scale
-        for tank in cfg.tanks:
-            assert tank.official_stoiip is not None
-            residual = _tank_residual(cfg, tank)
-            assert residual is not None
-            residual_samples = draw(residual)
-            data[f"official_{tank.key}"] = np.full(
-                cfg.n_realizations, float(tank.official_stoiip), dtype=float
-            )
-            data[f"residual_{tank.key}"] = residual_samples
-            multipliers = _apply_volume_anchor(
-                field_scale * residual_samples, model.official_as
-            )
-            if model.max_multiplier is not None:
-                multipliers = np.minimum(multipliers, float(model.max_multiplier))
-            column = f"stoiip_{tank.key}"
-            data[column] = float(tank.official_stoiip) * multipliers
-            stoiip_columns.append(column)
-    elif kind == "connected_volume":
-        if model.field_scale is not None:
-            field_scale = draw(model.field_scale)
-            data["field_scale"] = field_scale
-        else:
-            field_scale = np.ones(cfg.n_realizations, dtype=float)
-        for tank in cfg.tanks:
-            assert tank.official_stoiip is not None
-            assert tank.connectivity is not None
-            residual = _tank_residual(cfg, tank)
-            assert residual is not None
-            residual_samples = draw(residual)
-            conn = tank.connectivity
-            if 0.0 < conn.p_connected < 1.0:
-                unit = draw_unit()
-                if conn.group in shared_factors:
-                    unit = _correlate_unit(
-                        unit,
-                        shared_factors[conn.group],
-                        cfg.volume_model.connectivity_correlation,
-                    )
-                connected = (unit < conn.p_connected).astype(float)
-            else:
-                connected = np.full(
-                    cfg.n_realizations, float(conn.p_connected >= 1.0), dtype=float
-                )
-            connect_frac = np.where(
-                connected > 0.5, 1.0, float(conn.isolated_fraction)
-            )
-            scale = (
-                field_scale
-                if tank.role.lower() == "base"
-                else np.ones(cfg.n_realizations, dtype=float)
-            )
-            multipliers = residual_samples * scale
-            if model.max_multiplier is not None:
-                multipliers = np.minimum(multipliers, float(model.max_multiplier))
-            data[f"official_{tank.key}"] = np.full(
-                cfg.n_realizations, float(tank.official_stoiip), dtype=float
-            )
-            data[f"residual_{tank.key}"] = residual_samples
-            data[f"connected_{tank.key}"] = connected
-            data[f"connect_frac_{tank.key}"] = connect_frac
-            column = f"stoiip_{tank.key}"
-            data[column] = float(tank.official_stoiip) * connect_frac * multipliers
-            stoiip_columns.append(column)
     else:
-        for tank in cfg.tanks:
-            assert tank.stoiip is not None
-            column = f"stoiip_{tank.key}"
-            data[column] = draw(tank.stoiip)
-            stoiip_columns.append(column)
+        field_scale = np.ones(cfg.n_realizations, dtype=float)
+    for tank in cfg.tanks:
+        assert tank.official_stoiip is not None
+        assert tank.connectivity is not None
+        residual = _tank_residual(cfg, tank)
+        assert residual is not None
+        residual_samples = draw(residual)
+        conn = tank.connectivity
+        if 0.0 < conn.p_connected < 1.0:
+            unit = draw_unit()
+            if conn.group in shared_factors:
+                unit = _correlate_unit(
+                    unit,
+                    shared_factors[conn.group],
+                    model.connectivity_correlation,
+                )
+            connected = (unit < conn.p_connected).astype(float)
+        else:
+            connected = np.full(
+                cfg.n_realizations, float(conn.p_connected >= 1.0), dtype=float
+            )
+        connect_frac = np.where(connected > 0.5, 1.0, float(conn.isolated_fraction))
+        scale = (
+            field_scale
+            if tank.role.lower() == "base"
+            else np.ones(cfg.n_realizations, dtype=float)
+        )
+        multipliers = residual_samples * scale
+        if model.max_multiplier is not None:
+            multipliers = np.minimum(multipliers, float(model.max_multiplier))
+        data[f"official_{tank.key}"] = np.full(
+            cfg.n_realizations, float(tank.official_stoiip), dtype=float
+        )
+        data[f"residual_{tank.key}"] = residual_samples
+        data[f"connected_{tank.key}"] = connected
+        data[f"connect_frac_{tank.key}"] = connect_frac
+        column = f"stoiip_{tank.key}"
+        data[column] = float(tank.official_stoiip) * connect_frac * multipliers
+        stoiip_columns.append(column)
 
     data["stoiip_total"] = np.sum(
         np.column_stack([data[column] for column in stoiip_columns]), axis=1
     )
-    if kind == "connected_volume":
-        base_cols = [f"stoiip_{tank.key}" for tank in _tanks_with_role(cfg, "base")]
-        upside_cols = [f"stoiip_{tank.key}" for tank in _tanks_with_role(cfg, "upside")]
-        in_model_cols = [f"stoiip_{tank.key}" for tank in _tanks_in_model(cfg)]
-        if base_cols:
-            data["stoiip_base"] = np.sum(
-                np.column_stack([data[column] for column in base_cols]), axis=1
-            )
-        if upside_cols:
-            data["stoiip_upside"] = np.sum(
-                np.column_stack([data[column] for column in upside_cols]), axis=1
-            )
-        if in_model_cols:
-            data["stoiip_in_model"] = np.sum(
-                np.column_stack([data[column] for column in in_model_cols]), axis=1
-            )
+    base_cols = [f"stoiip_{tank.key}" for tank in _tanks_with_role(cfg, "base")]
+    upside_cols = [f"stoiip_{tank.key}" for tank in _tanks_with_role(cfg, "upside")]
+    in_model_cols = [f"stoiip_{tank.key}" for tank in _tanks_in_model(cfg)]
+    if base_cols:
+        data["stoiip_base"] = np.sum(
+            np.column_stack([data[column] for column in base_cols]), axis=1
+        )
+    if upside_cols:
+        data["stoiip_upside"] = np.sum(
+            np.column_stack([data[column] for column in upside_cols]), axis=1
+        )
+    if in_model_cols:
+        data["stoiip_in_model"] = np.sum(
+            np.column_stack([data[column] for column in in_model_cols]), axis=1
+        )
 
     for tank in cfg.tanks:
         if tank.aquifer_multiplier is not None:
@@ -1770,24 +1602,18 @@ def new_result_record(row: pd.Series, cfg: Config) -> dict[str, object]:
 def _input_columns(cfg: Config) -> list[str]:
     columns = [f"stoiip_{tank.key}" for tank in cfg.tanks]
     columns.append("stoiip_total")
-    kind = cfg.volume_model.kind.lower()
-    if kind == "fmu_residual":
+    if cfg.volume_model.field_scale is not None:
         columns.append("field_scale")
-        columns.extend(f"official_{tank.key}" for tank in cfg.tanks)
-        columns.extend(f"residual_{tank.key}" for tank in cfg.tanks)
-    elif kind == "connected_volume":
-        if cfg.volume_model.field_scale is not None:
-            columns.append("field_scale")
-        columns.extend(f"official_{tank.key}" for tank in cfg.tanks)
-        columns.extend(f"residual_{tank.key}" for tank in cfg.tanks)
-        columns.extend(f"connected_{tank.key}" for tank in cfg.tanks)
-        columns.extend(f"connect_frac_{tank.key}" for tank in cfg.tanks)
-        if _tanks_with_role(cfg, "base"):
-            columns.append("stoiip_base")
-        if _tanks_with_role(cfg, "upside"):
-            columns.append("stoiip_upside")
-        if _tanks_in_model(cfg):
-            columns.append("stoiip_in_model")
+    columns.extend(f"official_{tank.key}" for tank in cfg.tanks)
+    columns.extend(f"residual_{tank.key}" for tank in cfg.tanks)
+    columns.extend(f"connected_{tank.key}" for tank in cfg.tanks)
+    columns.extend(f"connect_frac_{tank.key}" for tank in cfg.tanks)
+    if _tanks_with_role(cfg, "base"):
+        columns.append("stoiip_base")
+    if _tanks_with_role(cfg, "upside"):
+        columns.append("stoiip_upside")
+    if _tanks_in_model(cfg):
+        columns.append("stoiip_in_model")
     columns.extend(
         f"aq_mult_{tank.key}"
         for tank in cfg.tanks
@@ -2260,13 +2086,7 @@ def _plot_field_total_stoiip(df: pd.DataFrame, cfg: Config) -> None:
 
     figure, axes = plt.subplots(1, 2, figsize=(11, 4))
     axes[0].hist(values, bins=30, color="steelblue", alpha=0.8)
-    kind = cfg.volume_model.kind.lower()
-    if kind == "connected_volume":
-        axes[0].set_title("Field STOIIP (connected volume, incl. optional upside)")
-    elif kind == "fmu_residual":
-        axes[0].set_title("Field STOIIP (official × shared scale × residual)")
-    else:
-        axes[0].set_title("Field STOIIP (sum of independent tanks)")
+    axes[0].set_title("Field STOIIP (connected volume, incl. optional upside)")
     axes[0].set_xlabel(cfg.unit_stoiip)
     axes[0].set_ylabel("count")
     ordered = np.sort(values)
@@ -2351,7 +2171,7 @@ def summarize(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         "sampling": cfg.sampling,
         "n_tanks": len(cfg.tanks),
         "volume_model": cfg.volume_model.kind,
-        "official_as": cfg.volume_model.official_as,
+        "connectivity_correlation": cfg.volume_model.connectivity_correlation,
         "gas_lift_values": list(cfg.gas_lift_values),
         "water_inj_rate_values": list(cfg.water_inj_rate_values),
         "water_inj_bhp_values": list(cfg.water_inj_bhp_values),
@@ -2419,11 +2239,11 @@ def _volume_source(samples: pd.DataFrame) -> pd.DataFrame:
 
 def _print_volume_diagnostics(samples: pd.DataFrame, cfg: Config) -> None:
     """Print official vs sampled STOIIP so a high-side prior is visible."""
-    kind = cfg.volume_model.kind.lower()
-    if kind not in {"fmu_residual", "connected_volume"}:
-        return
     source = _volume_source(samples)
-    print(f"\nVolume model: {kind} (official_as={cfg.volume_model.official_as})")
+    print(
+        "\nVolume model: connected_volume "
+        f"(connectivity_correlation={cfg.volume_model.connectivity_correlation})"
+    )
     print("Official numbers are working mapped cases, not the mean.")
     rows = []
     for tank in cfg.tanks:
@@ -2506,8 +2326,6 @@ def _print_volume_diagnostics(samples: pd.DataFrame, cfg: Config) -> None:
 
 def _summarize_decision(df: pd.DataFrame, cfg: Config) -> None:
     """Write a one-page decision table: base vs upside vs total STOIIP."""
-    if cfg.volume_model.kind.lower() != "connected_volume":
-        return
     source = _volume_source(df)
     rows = []
     scopes = [
@@ -2807,22 +2625,11 @@ def main(
 
     stoiip_columns = [f"stoiip_{tank.key}" for tank in cfg.tanks]
     if len(stoiip_columns) > 1:
-        kind = cfg.volume_model.kind.lower()
-        if kind == "connected_volume":
-            print(
-                "\nSample STOIIP rank correlation "
-                "(base tanks share field_scale; upside sand is independent):"
-            )
-        elif kind == "fmu_residual":
-            print(
-                "\nSample STOIIP rank correlation "
-                "(fmu_residual target: positive via shared field_scale):"
-            )
-        else:
-            print(
-                "\nSample STOIIP rank correlation "
-                "(independent target: approximately zero):"
-            )
+        print(
+            "\nSample STOIIP rank correlation "
+            "(base tanks share field_scale and their connectivity group; "
+            "the upside sand is independent):"
+        )
         rank_correlation = samples[stoiip_columns].rank().corr()
         print(rank_correlation.round(3).to_string())
     _print_volume_diagnostics(samples, cfg)

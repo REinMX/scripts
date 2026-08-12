@@ -152,9 +152,9 @@ mapping bias). It is **not** a second copy of the connectivity story.
 C does not share it — different sand, different contact, different
 chance of being on the well.
 
-`official_as` (the P40 anchor used by `fmu_residual`) is **off** here.
-The mixture already puts official on the high side. Anchoring again
-would double-count conservatism, or fight the discrete 0/1 on C.
+There is no percentile anchor. The mixture already puts official on the
+high side; rescaling it to sit at a chosen percentile would double-count
+conservatism, or fight the discrete 0/1 on C.
 
 ### Connectivity is one barrier, not two coin flips
 
@@ -208,17 +208,26 @@ If P50 of the field is 14, or P50 of C is 6.5, the prior is wrong.
 
 ---
 
-## 5. Other volume models still in the code
+## 5. Models that used to be here
 
-| `volume_model.kind` | Use when |
-|---|---|
-| `connected_volume` | This well. Connectivity is the story. |
-| `fmu_residual` | Connectivity already decided; only residual volume left. Official × shared scale × residual, optional `official_as: p40`. Equinor FMU / ERT residual-multiplier style. |
-| `independent` | Legacy. Each tank has its own `stoiip:` distribution. Do not use for the sidetrack. |
+`connected_volume` is now the only volume model. Two others were removed:
 
-`fmu_residual` is the right *second* model, after a test or interference
-data has settled communication. It is the wrong *first* model while
-“probably half” and “maybe the deep sand is on” are still the drivers.
+- **`independent`** — each tank drew its own `stoiip:` distribution and
+  the field was the sum. It diversified the shared risk away and made the
+  field low case too high. That argument is now made properly by
+  `connectivity_correlation` above, so the model is not needed to make it.
+- **`fmu_residual`** — official × shared scale × residual, with an
+  `official_as: p40` anchor. It is the right model *after* a test or
+  interference data has settled communication, and the wrong one while
+  “probably half” and “maybe the deep sand is on” are still the drivers.
+
+If communication is later settled by data, the honest move is to set
+`p_connected: 1.0` on the tanks that are shown to communicate and let the
+residual carry the remaining uncertainty — same arithmetic, one model.
+
+Old configs are not silently reinterpreted: a removed `volume_model.kind`
+or a per-tank `stoiip:` fails validation with a pointer to the
+replacement.
 
 ---
 

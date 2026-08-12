@@ -270,5 +270,4 @@ volume. See [oil-in-place.md](oil-in-place.md) §2.
 | One-factor Gaussian copula | `_correlate_unit()`, `_norm_cdf()` |
 | Shared factor | `field_scale` in `volume_model` |
 | Rank correlation | printed by `main()` before the run |
-| Percentile anchoring | `_apply_volume_anchor()`, `official_as:` |
 | Joint connectivity odds | `decision_volume_summary.csv` |

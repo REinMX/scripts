@@ -1,4 +1,4 @@
-"""Tests for FMU/ERT residual oil-in-place uncertainty."""
+"""Tests for connected-volume oil-in-place uncertainty."""
 
 from __future__ import annotations
 
@@ -12,35 +12,34 @@ import mbal_core as core
 import mbal_core as mbal
 
 
-def tank(
+def certain_tank(
     key: str,
     index: int,
+    official: float,
     *,
-    official: float | None = None,
-    stoiip: mbal.Distribution | None = None,
     residual: mbal.Distribution | None = None,
 ) -> mbal.TankConfig:
+    """A tank that always connects, so only residual and field_scale move."""
     return mbal.TankConfig(
         key=key,
         name=f"Tank {key}",
         index=index,
-        stoiip=stoiip,
         official_stoiip=official,
-        residual=residual,
+        connectivity=mbal.Connectivity(
+            kind="two_section",
+            p_connected=1.0,
+            isolated_fraction=0.5,
+            residual=residual
+            or mbal.Distribution(kind="lognormal", p90=0.85, p10=1.12),
+        ),
     )
 
 
-def fmu_cfg(**kwargs) -> mbal.Config:
+def certain_cfg(**kwargs) -> mbal.Config:
     base = mbal.Config(
-        tanks=(
-            tank("A", 0, official=4.5),
-            tank("B", 1, official=3.0),
-        ),
+        tanks=(certain_tank("A", 0, 4.5), certain_tank("B", 1, 3.0)),
         volume_model=mbal.VolumeModel(
-            kind="fmu_residual",
-            official_as="p40",
             field_scale=mbal.Distribution(kind="lognormal", p90=0.70, p10=1.18),
-            residual=mbal.Distribution(kind="lognormal", p90=0.85, p10=1.12),
         ),
         n_realizations=4_000,
         seed=11,
@@ -49,21 +48,8 @@ def fmu_cfg(**kwargs) -> mbal.Config:
     return replace(base, **kwargs) if kwargs else base
 
 
-def test_fmu_residual_anchors_official_at_p40() -> None:
-    samples = mbal.build_sample_table(fmu_cfg())
-
-    for key, official in (("A", 4.5), ("B", 3.0)):
-        p40 = float(np.percentile(samples[f"stoiip_{key}"], 60))
-        assert p40 == pytest.approx(official, rel=0.03)
-
-    # Mapped volumes sit above the median — not treated as P50 or the mean.
-    assert float(np.percentile(samples["stoiip_A"], 50)) < 4.5
-    assert float(np.percentile(samples["stoiip_B"], 50)) < 3.0
-    assert float(samples["stoiip_total"].mean()) <= 7.5 * 1.01
-
-
 def test_shared_field_scale_correlates_tanks() -> None:
-    samples = mbal.build_sample_table(fmu_cfg(n_realizations=3_000, seed=3))
+    samples = mbal.build_sample_table(certain_cfg(n_realizations=3_000, seed=3))
 
     corr = float(np.corrcoef(samples["stoiip_A"], samples["stoiip_B"])[0, 1])
     assert corr > 0.45
@@ -74,39 +60,9 @@ def test_shared_field_scale_correlates_tanks() -> None:
     np.testing.assert_allclose(samples["official_B"], 3.0)
 
 
-def test_independent_tanks_make_field_p90_optimistic() -> None:
-    fmu = mbal.build_sample_table(fmu_cfg(n_realizations=5_000, seed=5))
-
-    # Match each tank's fmu marginal with an independent lognormal, then sum.
-    def matched(key: str) -> mbal.Distribution:
-        values = fmu[f"stoiip_{key}"]
-        return mbal.Distribution(
-            kind="lognormal",
-            p90=float(np.percentile(values, 10)),
-            p10=float(np.percentile(values, 90)),
-        )
-
-    independent = mbal.build_sample_table(
-        mbal.Config(
-            tanks=(
-                tank("A", 0, stoiip=matched("A")),
-                tank("B", 1, stoiip=matched("B")),
-            ),
-            n_realizations=5_000,
-            seed=5,
-            sampling="lhs",
-        )
-    )
-
-    fmu_p90 = float(np.percentile(fmu["stoiip_total"], 10))
-    ind_p90 = float(np.percentile(independent["stoiip_total"], 10))
-    # False diversification lifts the independent field low-case.
-    assert fmu_p90 < ind_p90
-
-
 def test_max_multiplier_caps_upside() -> None:
-    cfg = fmu_cfg(
-        volume_model=replace(fmu_cfg().volume_model, max_multiplier=1.05),
+    cfg = certain_cfg(
+        volume_model=replace(certain_cfg().volume_model, max_multiplier=1.05),
         n_realizations=800,
         seed=2,
     )
@@ -115,46 +71,53 @@ def test_max_multiplier_caps_upside() -> None:
     assert samples["stoiip_B"].max() <= 3.0 * 1.05 + 1e-9
 
 
-def test_fmu_rejects_stoiip_and_requires_official() -> None:
-    cfg = fmu_cfg(
-        tanks=(
-            tank(
-                "A",
-                0,
-                official=4.5,
-                stoiip=mbal.Distribution(kind="fixed", value=4.5),
-            ),
-        )
-    )
-    with pytest.raises(ValueError, match="use official_stoiip"):
-        mbal.validate_config(cfg)
-
-    cfg = fmu_cfg(tanks=(tank("A", 0, stoiip=mbal.Distribution(kind="fixed", value=4.5)),))
+def test_tank_without_official_stoiip_is_rejected() -> None:
     with pytest.raises(ValueError, match="official_stoiip"):
-        mbal.validate_config(cfg)
+        mbal.validate_config(
+            certain_cfg(
+                tanks=(
+                    replace(certain_tank("A", 0, 4.5), official_stoiip=None),
+                )
+            )
+        )
 
 
-def test_yaml_fmu_volume_model(tmp_path) -> None:
-    path = tmp_path / "vol.yaml"
-    path.write_text(
+def test_removed_volume_models_fail_with_a_pointer_to_the_replacement() -> None:
+    """independent / fmu_residual are gone; old configs must say so clearly."""
+    for kind in ("independent", "fmu_residual"):
+        cfg = certain_cfg(volume_model=mbal.VolumeModel(kind=kind))
+        with pytest.raises(ValueError, match="connected_volume"):
+            mbal.validate_config(cfg)
+
+
+def test_yaml_with_a_removed_model_or_per_tank_stoiip_is_rejected(tmp_path) -> None:
+    removed_kind = tmp_path / "old_kind.yaml"
+    removed_kind.write_text(
         """
 volume_model:
   kind: fmu_residual
-  official_as: p40
   field_scale: {kind: lognormal, p90: 0.7, p10: 1.18}
-  residual: {kind: lognormal, p90: 0.85, p10: 1.12}
 tanks:
   - {key: A, name: A, index: 0, official_stoiip: 4.5}
-  - {key: B, name: B, index: 1, official_stoiip: 3.0}
 """,
         encoding="utf-8",
     )
-    cfg = mbal.load_config_yaml(path)
-    mbal.validate_config(cfg)
-    assert cfg.volume_model.kind == "fmu_residual"
-    samples = mbal.build_sample_table(replace(cfg, n_realizations=20, seed=1))
-    assert "field_scale" in samples.columns
-    assert set(samples["official_A"].unique()) == {4.5}
+    with pytest.raises(ValueError, match="connected_volume"):
+        mbal.validate_config(mbal.load_config_yaml(removed_kind))
+
+    per_tank = tmp_path / "old_stoiip.yaml"
+    per_tank.write_text(
+        """
+tanks:
+  - key: A
+    name: A
+    index: 0
+    stoiip: {kind: lognormal, p90: 20.0, p10: 70.0}
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="no longer supported"):
+        mbal.load_config_yaml(per_tank)
 
 
 def test_default_config_always_has_the_three_tanks() -> None:

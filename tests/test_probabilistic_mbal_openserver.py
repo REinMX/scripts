@@ -1,4 +1,4 @@
-"""Tests for independent per-tank probabilistic MBAL sampling."""
+"""Tests for per-tank probabilistic MBAL sampling and the run plumbing."""
 
 from __future__ import annotations
 
@@ -23,24 +23,46 @@ def fixed(value: float) -> mbal.Distribution:
 def tank(
     key: str,
     index: int,
-    stoiip: mbal.Distribution,
+    official: float,
     aquifer: mbal.Distribution | None = None,
+    *,
+    residual: mbal.Distribution | None = None,
 ) -> mbal.TankConfig:
+    """A certainly-connected tank, so stoiip_<key> == official x residual."""
     return mbal.TankConfig(
         key=key,
         name=f"Tank {key}",
         index=index,
-        stoiip=stoiip,
+        official_stoiip=official,
         aquifer_multiplier=aquifer,
+        connectivity=mbal.Connectivity(
+            kind="two_section",
+            p_connected=1.0,
+            isolated_fraction=0.5,
+            residual=residual if residual is not None else fixed(1.0),
+        ),
     )
 
 
-def test_tank_stoiip_samples_are_independent_not_a_total_split() -> None:
+def index_cfg(**kwargs) -> mbal.Config:
+    """Config pinned to index-based OpenServer tags."""
+    return mbal.Config(
+        tag_mode="index",
+        tags=dict(mbal.DEFAULT_INDEX_TAGS),
+        unit_stoiip="MMstb",
+        unit_press="psig",
+        unit_cum="MMstb",
+        **kwargs,
+    )
+
+
+def test_each_tank_is_sampled_on_its_own_not_split_from_a_field_total() -> None:
     cfg = mbal.Config(
         tanks=(
-            tank("A", 0, uniform(10.0, 20.0)),
-            tank("B", 1, uniform(100.0, 200.0)),
+            tank("A", 0, 15.0, residual=uniform(0.5, 1.5)),
+            tank("B", 1, 150.0, residual=uniform(0.5, 1.5)),
         ),
+        volume_model=mbal.VolumeModel(),  # no shared field_scale
         n_realizations=5_000,
         seed=17,
         sampling="mc",
@@ -48,10 +70,13 @@ def test_tank_stoiip_samples_are_independent_not_a_total_split() -> None:
 
     samples = mbal.build_sample_table(cfg)
 
-    u_a = (samples["stoiip_A"] - 10.0) / 10.0
-    u_b = (samples["stoiip_B"] - 100.0) / 100.0
-    assert abs(float(np.corrcoef(u_a, u_b)[0, 1])) < 0.06
-    assert not np.allclose(u_a, u_b)
+    # Residuals are drawn per tank, so the two do not move together...
+    correlation = float(
+        np.corrcoef(samples["residual_A"], samples["residual_B"])[0, 1]
+    )
+    assert abs(correlation) < 0.06
+    assert not np.allclose(samples["residual_A"], samples["residual_B"])
+    # ...and the field total is their sum, not a total carved into shares.
     np.testing.assert_allclose(
         samples["stoiip_total"], samples["stoiip_A"] + samples["stoiip_B"]
     )
@@ -64,14 +89,19 @@ def test_each_tank_can_have_a_different_distribution_family() -> None:
             tank(
                 "A",
                 0,
-                mbal.Distribution(kind="lognormal", p90=20.0, p10=80.0),
+                1.0,
+                residual=mbal.Distribution(kind="lognormal", p90=20.0, p10=80.0),
             ),
             tank(
                 "B",
                 1,
-                mbal.Distribution(kind="triangular", low=10.0, mode=25.0, high=60.0),
+                1.0,
+                residual=mbal.Distribution(
+                    kind="triangular", low=10.0, mode=25.0, high=60.0
+                ),
             ),
         ),
+        volume_model=mbal.VolumeModel(),
         n_realizations=4_000,
         seed=42,
         sampling="lhs",
@@ -88,36 +118,31 @@ def test_each_tank_can_have_a_different_distribution_family() -> None:
 def test_arbitrary_number_of_tanks_is_supported() -> None:
     cfg = mbal.Config(
         tanks=(
-            tank("North", 2, fixed(12.0)),
-            tank("Central", 5, uniform(20.0, 30.0)),
-            tank("South", 7, fixed(40.0)),
+            tank("North", 2, 12.0),
+            tank("Central", 5, 25.0, residual=uniform(0.8, 1.2)),
+            tank("South", 7, 40.0),
         ),
+        volume_model=mbal.VolumeModel(),
         n_realizations=25,
         seed=9,
     )
 
     samples = mbal.build_sample_table(cfg)
 
-    assert list(samples.columns) == [
-        "realization",
-        "stoiip_North",
-        "stoiip_Central",
-        "stoiip_South",
-        "stoiip_total",
-    ]
+    stoiip_columns = ["stoiip_North", "stoiip_Central", "stoiip_South"]
+    assert set(stoiip_columns).issubset(samples.columns)
     np.testing.assert_allclose(samples["stoiip_North"], 12.0)
     np.testing.assert_allclose(samples["stoiip_South"], 40.0)
     np.testing.assert_allclose(
-        samples["stoiip_total"],
-        samples[["stoiip_North", "stoiip_Central", "stoiip_South"]].sum(axis=1),
+        samples["stoiip_total"], samples[stoiip_columns].sum(axis=1)
     )
 
 
 def test_aquifer_multiplier_is_configured_and_sampled_per_tank() -> None:
-    cfg = mbal.Config(
+    cfg = index_cfg(
         tanks=(
-            tank("A", 0, fixed(30.0), uniform(0.5, 1.5)),
-            tank("B", 1, fixed(50.0), fixed(2.0)),
+            tank("A", 0, 30.0, uniform(0.5, 1.5)),
+            tank("B", 1, 50.0, fixed(2.0)),
         ),
         n_realizations=100,
         seed=3,
@@ -138,10 +163,10 @@ class RecordingServer:
 
 
 def test_apply_realization_uses_each_tanks_index_and_own_values() -> None:
-    cfg = mbal.Config(
+    cfg = index_cfg(
         tanks=(
-            tank("East", 3, fixed(20.0), fixed(1.2)),
-            tank("West", 8, fixed(70.0)),
+            tank("East", 3, 20.0, fixed(1.2)),
+            tank("West", 8, 70.0),
         )
     )
     row = pd.Series({"stoiip_East": 21.0, "aq_mult_East": 1.3, "stoiip_West": 73.0})
@@ -157,9 +182,7 @@ def test_apply_realization_uses_each_tanks_index_and_own_values() -> None:
 
 
 def test_new_result_record_has_stable_columns_before_a_failed_run() -> None:
-    cfg = mbal.Config(
-        tanks=(tank("East", 3, fixed(20.0)), tank("West", 8, fixed(70.0)))
-    )
+    cfg = mbal.Config(tanks=(tank("East", 3, 20.0), tank("West", 8, 70.0)))
     row = pd.Series(
         {
             "realization": 4,
@@ -195,7 +218,7 @@ def test_new_result_record_has_stable_columns_before_a_failed_run() -> None:
 
 
 def test_duplicate_tank_keys_are_rejected() -> None:
-    cfg = mbal.Config(tanks=(tank("A", 0, fixed(10.0)), tank("A", 1, fixed(20.0))))
+    cfg = mbal.Config(tanks=(tank("A", 0, 10.0), tank("A", 1, 20.0)))
 
     with pytest.raises(ValueError, match="tank keys must be unique"):
         mbal.build_sample_table(cfg)
@@ -203,7 +226,14 @@ def test_duplicate_tank_keys_are_rejected() -> None:
 
 def test_invalid_distribution_parameters_are_rejected() -> None:
     cfg = mbal.Config(
-        tanks=(tank("A", 0, mbal.Distribution(kind="lognormal", p90=80.0, p10=20.0)),)
+        tanks=(
+            tank(
+                "A",
+                0,
+                10.0,
+                residual=mbal.Distribution(kind="lognormal", p90=80.0, p10=20.0),
+            ),
+        )
     )
 
     with pytest.raises(ValueError, match="p90 must be lower than p10"):
@@ -219,7 +249,7 @@ def test_percentiles_include_std_and_p95_p5() -> None:
 
 def test_resume_retries_failed_but_skips_ok(tmp_path) -> None:
     cfg = mbal.Config(
-        tanks=(tank("A", 0, fixed(10.0)), tank("B", 1, fixed(20.0))),
+        tanks=(tank("A", 0, 10.0), tank("B", 1, 20.0)),
         n_realizations=3,
         seed=1,
         out_dir=str(tmp_path),
@@ -288,7 +318,7 @@ def test_missing_step_count_warns_before_reading_results_index_zero(caplog) -> N
     Falling back to it silently would report ~0 cumulative oil for every
     realization while still marking each run 'ok'.
     """
-    cfg = mbal.Config(tanks=(tank("A", 0, fixed(10.0)),))
+    cfg = mbal.Config(tanks=(tank("A", 0, 10.0),))
 
     class StubServer:
         def __init__(self) -> None:
@@ -319,7 +349,7 @@ def test_missing_step_count_warns_before_reading_results_index_zero(caplog) -> N
 
 
 def test_readable_step_count_reads_the_last_step_without_warning(caplog) -> None:
-    cfg = mbal.Config(tanks=(tank("A", 0, fixed(10.0)),))
+    cfg = mbal.Config(tanks=(tank("A", 0, 10.0),))
 
     class StubServer:
         def get(self, tag: str) -> float:
@@ -352,30 +382,14 @@ def test_gas_lift_tag_uses_the_configured_well_index() -> None:
 def test_aquifer_distribution_without_its_tag_is_rejected_up_front() -> None:
     """Fail at config time, not once per realization inside the run loop."""
     # Name-mode defaults ship aquifer_volume but not aquifer_mult.
-    cfg = mbal.Config(
-        tag_mode="name",
-        tags=dict(mbal.DEFAULT_NAME_TAGS),
-        tanks=(tank("A", 0, fixed(10.0), aquifer=fixed(1.0)),),
-    )
+    cfg = mbal.Config(tanks=(tank("A", 0, 10.0, aquifer=fixed(1.0)),))
     with pytest.raises(ValueError, match="aquifer_mult"):
         mbal.validate_config(cfg)
 
     # Index-mode defaults ship aquifer_mult but not aquifer_volume.
-    cfg = mbal.Config(
-        tag_mode="index",
-        tags=dict(mbal.DEFAULT_INDEX_TAGS),
-        tanks=(
-            mbal.TankConfig(
-                key="A",
-                name="A",
-                index=0,
-                stoiip=fixed(10.0),
-                aquifer_volume=fixed(1.0),
-            ),
-        ),
-    )
+    with_volume = replace(tank("A", 0, 10.0), aquifer_volume=fixed(1.0))
     with pytest.raises(ValueError, match="aquifer_volume"):
-        mbal.validate_config(cfg)
+        mbal.validate_config(index_cfg(tanks=(with_volume,)))
 
 
 def test_summarize_only_without_results_reports_instead_of_tracebacking(

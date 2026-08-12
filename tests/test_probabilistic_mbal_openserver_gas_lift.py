@@ -24,20 +24,29 @@ def tank(
     key: str,
     name: str,
     index: int,
-    stoiip: mbal.Distribution,
+    official: float,
     aquifer: mbal.Distribution | None = None,
+    *,
+    residual: mbal.Distribution | None = None,
 ) -> mbal.TankConfig:
+    """Always-connected tank, so stoiip_<key> == official x residual."""
     return mbal.TankConfig(
         key=key,
         name=name,
         index=index,
-        stoiip=stoiip,
+        official_stoiip=official,
         aquifer_volume=aquifer,
+        connectivity=mbal.Connectivity(
+            kind="two_section",
+            p_connected=1.0,
+            isolated_fraction=0.5,
+            residual=residual if residual is not None else fixed(1.0),
+        ),
     )
 
 
 def name_cfg(**kwargs) -> mbal.Config:
-    """Name-based tags; independent tanks unless the test passes its own model."""
+    """Name-based tags, no shared field_scale unless a test asks for one."""
     base = replace(
         mbal.default_config(),
         volume_model=mbal.VolumeModel(),
@@ -45,8 +54,8 @@ def name_cfg(**kwargs) -> mbal.Config:
         unit_cum="MMstb",
         unit_press="psig",
         tanks=(
-            tank("bottom", "REPLACE_WITH_BOTTOM_TANK_NAME", 0, fixed(20.0)),
-            tank("top", "REPLACE_WITH_TOP_TANK_NAME", 1, fixed(40.0)),
+            tank("bottom", "REPLACE_WITH_BOTTOM_TANK_NAME", 0, 20.0),
+            tank("top", "REPLACE_WITH_TOP_TANK_NAME", 1, 40.0),
         ),
     )
     return replace(base, **kwargs) if kwargs else base
@@ -55,8 +64,8 @@ def name_cfg(**kwargs) -> mbal.Config:
 def test_gas_lift_sweep_reuses_each_probabilistic_realization() -> None:
     cfg = name_cfg(
         tanks=(
-            tank("bottom", "BOTTOM_TANK", 0, uniform(10.0, 20.0)),
-            tank("top", "TOP_TANK", 1, uniform(30.0, 50.0)),
+            tank("bottom", "BOTTOM_TANK", 0, 1.0, residual=uniform(10.0, 20.0)),
+            tank("top", "TOP_TANK", 1, 1.0, residual=uniform(30.0, 50.0)),
         ),
         n_realizations=12,
         seed=7,
@@ -87,8 +96,8 @@ class RecordingServer:
 def test_apply_realization_uses_verified_name_based_input_tags() -> None:
     cfg = name_cfg(
         tanks=(
-            tank("bottom", "BOTTOM_TANK", 0, fixed(20.0), fixed(100.0)),
-            tank("top", "TOP_TANK", 1, fixed(40.0)),
+            tank("bottom", "BOTTOM_TANK", 0, 20.0, fixed(100.0)),
+            tank("top", "TOP_TANK", 1, 40.0),
         ),
         gas_lift_well="LIFTED_WELL",
         gas_lift_prediction_index=1,

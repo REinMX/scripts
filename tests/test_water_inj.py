@@ -12,11 +12,18 @@ import mbal_core as mbal
 
 
 def tank(key: str, name: str, index: int, official: float) -> mbal.TankConfig:
+    """Always-connected tank: the injection tests are about plumbing, not volumes."""
     return mbal.TankConfig(
         key=key,
         name=name,
         index=index,
         official_stoiip=official,
+        connectivity=mbal.Connectivity(
+            kind="two_section",
+            p_connected=1.0,
+            isolated_fraction=0.5,
+            residual=mbal.Distribution(kind="lognormal", p90=0.85, p10=1.12),
+        ),
     )
 
 
@@ -29,10 +36,7 @@ def inj_cfg(**kwargs) -> mbal.Config:
     updates = {
         "tanks": tanks,
         "volume_model": mbal.VolumeModel(
-            kind="fmu_residual",
-            official_as="p40",
             field_scale=mbal.Distribution(kind="lognormal", p90=0.70, p10=1.18),
-            residual=mbal.Distribution(kind="lognormal", p90=0.85, p10=1.12),
         ),
         "n_realizations": 8,
         "seed": 4,

@@ -39,11 +39,6 @@ false diversification — it narrows the field distribution and invents a
 "exactly one sand connects" case. A and B share `base_sands` at 0.8; the
 deeper sand C is a separate question and stays out.
 
-**`fmu_residual`**. Official × shared scale × residual, after connectivity
-is already decided.
-
-**`independent`**. Legacy per-tank `stoiip:` draws. Optimistic field P90.
-
 ### Operational sensitivities
 
 Gas-lift rate, water-injection rate and injector BHP are **controls**, not
@@ -117,7 +112,7 @@ reconnect_every: 0       # reopen model every N ok runs (0 = never)
 log_level: INFO
 
 volume_model:
-  kind: connected_volume      # or fmu_residual | independent
+  kind: connected_volume      # the only model
   field_scale: { kind: lognormal, p90: 0.88, p10: 1.10 }
   residual: { kind: lognormal, p90: 0.85, p10: 1.12 }
   connectivity_correlation: 0.8   # within a connectivity group; 0 = independent
@@ -145,8 +140,10 @@ tags:
 
 Supported distributions: `fixed`, `uniform`, `triangular`, `lognormal` (O&G P90/P10).
 
-Volume models: `connected_volume` (this well), `fmu_residual` (residual
-only), `independent` (legacy per-tank `stoiip`).
+One volume model: `connected_volume`. Each tank needs `official_stoiip`
+plus `connectivity`. The older `fmu_residual` and `independent` models and
+per-tank `stoiip:` draws were removed; configs using them fail with a
+pointer to the replacement.
 
 **Always** copy exact OpenServer variable names from MBAL’s browser into `tags`
 before a licensed run — strings differ by IPM version.

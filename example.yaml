@@ -27,7 +27,6 @@ unit_cum: MSm3
 
 volume_model:
   kind: connected_volume
-  official_as: none
   field_scale:
     kind: lognormal
     p90: 0.88
