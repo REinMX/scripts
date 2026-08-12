@@ -329,3 +329,60 @@ def test_readable_step_count_reads_the_last_step_without_warning(caplog) -> None
     with caplog.at_level("WARNING", logger="mbal"):
         mbal.read_results(StubServer(), cfg, pd.Series({"stoiip_A": 10.0}))
     assert not caplog.messages
+
+
+def test_gas_lift_tag_uses_the_configured_well_index() -> None:
+    """Index tag mode must address the named well, not always PREDWELL[0]."""
+    cfg = mbal.Config(
+        tag_mode="index",
+        tags=dict(mbal.DEFAULT_INDEX_TAGS),
+        gas_lift_well="INJ-2",
+        gas_lift_well_index=3,
+        gas_lift_prediction_index=1,
+        gas_lift_values=(0.0, 1.0),
+    )
+    assert core._gas_lift_tag(cfg) == "MBAL.MB[0].PREDWELL[3][1].GASLIFTRATE"
+
+    named = replace(
+        cfg, tag_mode="name", tags=dict(mbal.DEFAULT_NAME_TAGS)
+    )
+    assert core._gas_lift_tag(named) == "MBAL.MB[0].PREDWELL[INJ-2][1].GASLIFTRATE"
+
+
+def test_aquifer_distribution_without_its_tag_is_rejected_up_front() -> None:
+    """Fail at config time, not once per realization inside the run loop."""
+    # Name-mode defaults ship aquifer_volume but not aquifer_mult.
+    cfg = mbal.Config(
+        tag_mode="name",
+        tags=dict(mbal.DEFAULT_NAME_TAGS),
+        tanks=(tank("A", 0, fixed(10.0), aquifer=fixed(1.0)),),
+    )
+    with pytest.raises(ValueError, match="aquifer_mult"):
+        mbal.validate_config(cfg)
+
+    # Index-mode defaults ship aquifer_mult but not aquifer_volume.
+    cfg = mbal.Config(
+        tag_mode="index",
+        tags=dict(mbal.DEFAULT_INDEX_TAGS),
+        tanks=(
+            mbal.TankConfig(
+                key="A",
+                name="A",
+                index=0,
+                stoiip=fixed(10.0),
+                aquifer_volume=fixed(1.0),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="aquifer_volume"):
+        mbal.validate_config(cfg)
+
+
+def test_summarize_only_without_results_reports_instead_of_tracebacking(
+    tmp_path, capsys
+) -> None:
+    code = core.main(
+        ["--summarize-only", "--out-dir", str(tmp_path / "nothing-here")]
+    )
+    assert code == 1
+    assert "No results CSV" in capsys.readouterr().err

@@ -368,6 +368,7 @@ class Config:
 
     # --- gas lift (optional) -----------------------------------------------
     gas_lift_well: str = "REPLACE_WITH_GAS_LIFT_WELL_NAME"
+    gas_lift_well_index: int = 0  # used by tag_mode 'index' ({i} in the tag)
     gas_lift_prediction_index: int = 1
     gas_lift_values: tuple[float, ...] = ()
 
@@ -586,6 +587,7 @@ def config_from_dict(data: dict[str, Any], *, base: Config | None = None) -> Con
     int_keys = (
         "n_realizations",
         "seed",
+        "gas_lift_well_index",
         "gas_lift_prediction_index",
         "water_inj_well_index",
         "water_inj_prediction_index",
@@ -720,6 +722,7 @@ def config_to_dict(cfg: Config) -> dict[str, Any]:
         "log_level": cfg.log_level,
         "volume_model": cfg.volume_model.to_dict(),
         "gas_lift_well": cfg.gas_lift_well,
+        "gas_lift_well_index": cfg.gas_lift_well_index,
         "gas_lift_prediction_index": cfg.gas_lift_prediction_index,
         "gas_lift_values": list(cfg.gas_lift_values),
         "water_inj_well": cfg.water_inj_well,
@@ -820,18 +823,37 @@ def validate_config(cfg: Config) -> None:
             )
         if tank.index < 0:
             raise ValueError(f"tank {tank.key}: index must be non-negative")
+        # The tag defaults are split by mode - index mode ships aquifer_mult,
+        # name mode ships aquifer_volume. Catch the mismatch here rather than
+        # letting every realization fail one at a time inside the run loop.
         if tank.aquifer_multiplier is not None:
             validate_distribution(
                 tank.aquifer_multiplier, f"tank {tank.key} aquifer multiplier"
             )
+            if "aquifer_mult" not in cfg.tags:
+                raise ValueError(
+                    f"tank {tank.key}: aquifer_multiplier is set but "
+                    "tags['aquifer_mult'] is missing; copy the exact string "
+                    "from MBAL's OpenServer browser into tags"
+                )
         if tank.aquifer_volume is not None:
             validate_distribution(
                 tank.aquifer_volume, f"tank {tank.key} aquifer volume"
             )
+            if "aquifer_volume" not in cfg.tags:
+                raise ValueError(
+                    f"tank {tank.key}: aquifer_volume is set but "
+                    "tags['aquifer_volume'] is missing; copy the exact string "
+                    "from MBAL's OpenServer browser into tags"
+                )
     if any(value < 0.0 or not math.isfinite(value) for value in cfg.gas_lift_values):
         raise ValueError("gas-lift sensitivity values must be finite and >= 0")
     if cfg.gas_lift_values and "gas_lift_rate" not in cfg.tags:
         raise ValueError("gas_lift_values set but tags['gas_lift_rate'] is missing")
+    if cfg.gas_lift_well_index < 0:
+        raise ValueError("gas_lift_well_index must be non-negative")
+    if cfg.gas_lift_prediction_index < 0:
+        raise ValueError("gas_lift_prediction_index must be non-negative")
     _validate_water_inj(cfg)
 
 
@@ -1520,7 +1542,9 @@ def _aquifer_volume_tag(cfg: Config, tank: TankConfig) -> str:
 
 def _gas_lift_tag(cfg: Config) -> str:
     return cfg.tags["gas_lift_rate"].format(
-        well=cfg.gas_lift_well, p=cfg.gas_lift_prediction_index, i=0
+        well=cfg.gas_lift_well,
+        i=cfg.gas_lift_well_index,
+        p=cfg.gas_lift_prediction_index,
     )
 
 
@@ -2732,6 +2756,15 @@ def main(
 
     if args.summarize_only:
         path = os.path.join(cfg.out_dir, cfg.out_csv)
+        if not os.path.exists(path):
+            LOG.error("no results CSV at %s", path)
+            print(
+                f"No results CSV at {path}.\n"
+                "Run without --summarize-only first, or point --out-dir at the "
+                f"directory holding {cfg.out_csv}.",
+                file=sys.stderr,
+            )
+            return 1
         LOG.info("Summarize-only from %s", path)
         summarize(pd.read_csv(path), cfg)
         return 0

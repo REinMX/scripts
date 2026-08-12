@@ -52,9 +52,13 @@ decision table. MBAL does not need to be open.
 python mbal.py --config example.yaml --dry-run --n 800
 ```
 
-3. Open `mbal_water_inj_output/decision_volume_summary.csv`.
-4. Check: P50 of the deeper sand is 0; base P50 is well below official
+4. Open `mbal_output/decision_volume_summary.csv`.
+5. Check: P50 of the deeper sand is 0; base P50 is well below official
    A+B. If not, the prior is too high.
+6. Check `P(all base tanks isolated)`. If it looks like the product of
+   the individual P(connected) values, the shared barrier is not being
+   modelled — see `connectivity_correlation` in
+   [oil-in-place.md](oil-in-place.md#4-the-connected-volume-model).
 
 ---
 
