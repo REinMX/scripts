@@ -2642,6 +2642,16 @@ def build_arg_parser(description: str) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--connectivity-correlation",
+        type=float,
+        metavar="RHO",
+        help=(
+            "0-1 coupling between tanks sharing a connectivity group. Run 0 "
+            "and 1 as bounding cases: 0 = the sands are isolated by different "
+            "barriers, 1 = one barrier decides them together"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="sample and report inputs only; never open MBAL",
@@ -2702,6 +2712,11 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> Config:
             raise SystemExit(f"invalid --water-inj-bhp-values: {error}") from error
     if getattr(args, "water_inj_control", None):
         updates["water_inj_control"] = args.water_inj_control
+    if getattr(args, "connectivity_correlation", None) is not None:
+        updates["volume_model"] = replace(
+            cfg.volume_model,
+            connectivity_correlation=args.connectivity_correlation,
+        )
     return replace(cfg, **updates) if updates else cfg
 
 

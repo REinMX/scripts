@@ -440,3 +440,21 @@ tanks:
     # Equal p_connected on one shared barrier: the tanks move together.
     samples = mbal.build_sample_table(replace(cfg, n_realizations=1_000, seed=4))
     np.testing.assert_allclose(samples["connected_A"], samples["connected_B"])
+
+
+def test_connectivity_correlation_can_be_swept_from_the_command_line() -> None:
+    """Bounding cases should be one flag, not a config edit."""
+    parser = core.build_arg_parser("test")
+    for value in (0.0, 1.0):
+        args = parser.parse_args(["--connectivity-correlation", str(value)])
+        cfg = core.apply_cli_overrides(mbal.default_config(), args)
+        mbal.validate_config(cfg)
+        assert cfg.volume_model.connectivity_correlation == value
+        # Everything else about the volume model survives the override.
+        assert cfg.volume_model.kind == "connected_volume"
+        assert cfg.volume_model.field_scale is not None
+
+    untouched = core.apply_cli_overrides(
+        mbal.default_config(), parser.parse_args([])
+    )
+    assert untouched.volume_model.connectivity_correlation == 0.8
