@@ -1,4 +1,9 @@
-# Single config for this well. Always three tanks.
+# Public anonymized template. DO NOT put private model paths, object names,
+# OpenServer strings, asset priors, or work data in this committed file.
+# Copy it to the gitignored mbal_config.local.yaml and edit only that copy.
+# The numerical values below are examples and are not licensed-run defaults.
+#
+# Single connected-volume example with three tanks.
 #   python mbal.py --config example.yaml --dry-run --n 200
 #   python mbal.py --config example.yaml --n 200
 #

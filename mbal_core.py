@@ -755,7 +755,15 @@ def validate_config(cfg: Config) -> None:
     if len(indices) != len(set(indices)):
         raise ValueError("tank indices must be unique")
 
-    required_tags = {"cmd_open", "cmd_run_pred", "cmd_close", "tank_stoiip"}
+    required_tags = {
+        "cmd_open",
+        "cmd_run_pred",
+        "cmd_close",
+        "tank_stoiip",
+        "res_nsteps",
+        "res_cumoil",
+        "res_pressure",
+    }
     missing_tags = required_tags.difference(cfg.tags)
     if missing_tags:
         raise ValueError(f"tags missing required keys: {sorted(missing_tags)}")
@@ -802,6 +810,73 @@ def validate_config(cfg: Config) -> None:
     if cfg.gas_lift_prediction_index < 0:
         raise ValueError("gas_lift_prediction_index must be non-negative")
     _validate_water_inj(cfg)
+
+
+_EXAMPLE_MBAL_FILE = r"C:\Work\Models\two_tank_model.mbi"
+
+
+def _is_example_value(value: str) -> bool:
+    return "REPLACE_WITH_" in value.upper()
+
+
+def validate_licensed_run_config(
+    cfg: Config, *, check_model_file: bool = False
+) -> None:
+    """Reject public example values before any licensed OpenServer action.
+
+    This is deliberately separate from :func:`validate_config`: dry runs and
+    tests must remain usable with the committed anonymized example. It cannot
+    prove that a version-specific OpenServer string is correct; only a probe
+    against the installed MBAL model can do that.
+    """
+    validate_config(cfg)
+    problems: list[str] = []
+
+    if not cfg.mbal_file.strip() or cfg.mbal_file == _EXAMPLE_MBAL_FILE:
+        problems.append("mbal_file still contains the committed example path")
+    elif _is_example_value(cfg.mbal_file):
+        problems.append("mbal_file contains REPLACE_WITH_ placeholder text")
+    elif not cfg.mbal_file.lower().endswith(".mbi"):
+        problems.append("mbal_file must point to an .mbi file")
+    elif check_model_file and not os.path.isfile(cfg.mbal_file):
+        problems.append(f"mbal_file does not exist: {cfg.mbal_file}")
+
+    if not cfg.openserver_prog_id.strip() or _is_example_value(
+        cfg.openserver_prog_id
+    ):
+        problems.append("openserver_prog_id is empty or unresolved")
+
+    for tank in _tanks_in_model(cfg):
+        if not tank.name.strip() or _is_example_value(tank.name):
+            problems.append(f"tank {tank.key} name is empty or unresolved")
+
+    if cfg.gas_lift_values and (
+        not cfg.gas_lift_well.strip() or _is_example_value(cfg.gas_lift_well)
+    ):
+        problems.append("gas_lift_well is empty or unresolved")
+
+    if (cfg.water_inj_rate_values or cfg.water_inj_bhp_values) and (
+        not cfg.water_inj_well.strip() or _is_example_value(cfg.water_inj_well)
+    ):
+        problems.append("water_inj_well is empty or unresolved")
+
+    for key, value in cfg.tags.items():
+        if not value.strip() or _is_example_value(value):
+            problems.append(f"tags[{key!r}] is empty or unresolved")
+
+    for key, value in (
+        ("unit_stoiip", cfg.unit_stoiip),
+        ("unit_press", cfg.unit_press),
+        ("unit_cum", cfg.unit_cum),
+    ):
+        if not value.strip() or _is_example_value(value):
+            problems.append(f"{key} is empty or unresolved")
+
+    if problems:
+        details = "\n".join(f"  - {problem}" for problem in problems)
+        raise ValueError(
+            "licensed-run config contains example/placeholder values:\n" + details
+        )
 
 
 def _tank_residual(cfg: Config, tank: TankConfig) -> Distribution | None:
@@ -2475,6 +2550,22 @@ def build_arg_parser(description: str) -> argparse.ArgumentParser:
         help="sample and report inputs only; never open MBAL",
     )
     parser.add_argument(
+        "--validate-config",
+        action="store_true",
+        help=(
+            "validate YAML and reject unresolved example values; do not create "
+            "outputs or open MBAL"
+        ),
+    )
+    parser.add_argument(
+        "--check-openserver",
+        action="store_true",
+        help=(
+            "Windows smoke check: dispatch COM, open the model and read configured "
+            "input tags; do not write inputs or run prediction"
+        ),
+    )
+    parser.add_argument(
         "--summarize-only",
         action="store_true",
         help="re-read the results CSV and regenerate summary/plots",
@@ -2581,6 +2672,49 @@ def main(
     cfg = apply_cli_overrides(cfg, args)
     validate_config(cfg)
 
+    if args.validate_config or args.check_openserver:
+        validate_licensed_run_config(cfg, check_model_file=sys.platform == "win32")
+
+    if args.validate_config and not args.check_openserver:
+        print(
+            "Configuration is structurally valid and has no unresolved "
+            "example values. No MBAL/OpenServer session was opened; verify "
+            "version-specific tags with --check-openserver on the licensed "
+            "Windows host."
+        )
+        return 0
+
+    if args.check_openserver:
+        if sys.platform != "win32":
+            print(
+                "OpenServer smoke check is Windows-only. No COM dispatch was attempted.",
+                file=sys.stderr,
+            )
+            return 1
+        setup_logging(cfg.log_level, log_file=None)
+        srv: OpenServer | None = None
+        try:
+            # A smoke check must probe tags even if a full campaign later opts out.
+            smoke_cfg = replace(cfg, validate_tags=True)
+            srv = _open_model(smoke_cfg)
+        except Exception as error:
+            LOG.exception("OpenServer smoke check failed")
+            print(f"OpenServer smoke check failed: {error}", file=sys.stderr)
+            return 1
+        finally:
+            if srv is not None:
+                srv.shutdown(cfg.tags["cmd_close"])
+        print(
+            "OpenServer smoke check passed: COM dispatch, model open, and configured "
+            "input-tag reads succeeded. No input was written and no prediction was "
+            "run; use a one-realization licensed run to verify the command and results."
+        )
+        return 0
+
+    if sys.platform == "win32" and not args.dry_run and not args.summarize_only:
+        # Reject placeholders and a missing model before sampling or creating output.
+        validate_licensed_run_config(cfg, check_model_file=True)
+
     log_path = os.path.join(cfg.out_dir, "mbal_run.log")
     setup_logging(cfg.log_level, log_file=None)  # file after out_dir known
     # Always log to stdout; also to out_dir when not dry-run only is fine always
@@ -2685,5 +2819,6 @@ __all__ = [
     "unit_hypercube",
     "validate_config",
     "validate_distribution",
+    "validate_licensed_run_config",
     "validate_openserver_tags",
 ]

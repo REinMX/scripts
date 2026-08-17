@@ -400,3 +400,61 @@ def test_summarize_only_without_results_reports_instead_of_tracebacking(
     )
     assert code == 1
     assert "No results CSV" in capsys.readouterr().err
+
+
+def test_required_prediction_result_tags_are_validated_up_front() -> None:
+    tags = dict(mbal.DEFAULT_NAME_TAGS)
+    del tags["res_cumoil"]
+    cfg = replace(mbal.default_config(), tags=tags)
+
+    with pytest.raises(ValueError, match="res_cumoil"):
+        mbal.validate_config(cfg)
+
+
+def test_licensed_readiness_rejects_example_placeholders() -> None:
+    with pytest.raises(ValueError, match="example/placeholder"):
+        mbal.validate_licensed_run_config(mbal.default_config())
+
+
+def test_validate_config_cli_is_offline_and_writes_no_output(tmp_path, capsys) -> None:
+    yaml = pytest.importorskip("yaml")
+    cfg = replace(
+        mbal.default_config(),
+        mbal_file=r"C:\\Private\\Models\\working_copy.mbi",
+        tanks=tuple(
+            replace(item, name=f"PRIVATE_TANK_{item.key}")
+            for item in mbal.default_config().tanks
+        ),
+        out_dir=str(tmp_path / "must-not-exist"),
+    )
+    path = tmp_path / "mbal_config.local.yaml"
+    path.write_text(
+        yaml.safe_dump(mbal.config_to_dict(cfg), sort_keys=False), encoding="utf-8"
+    )
+
+    assert mbal.main(["--config", str(path), "--validate-config"]) == 0
+    assert not (tmp_path / "must-not-exist").exists()
+    output = capsys.readouterr().out
+    assert "No MBAL/OpenServer session was opened" in output
+    assert "PRIVATE_TANK" not in output
+
+
+def test_check_openserver_is_windows_only_without_dispatch(tmp_path, capsys) -> None:
+    yaml = pytest.importorskip("yaml")
+    cfg = replace(
+        mbal.default_config(),
+        mbal_file=r"C:\\Private\\Models\\working_copy.mbi",
+        tanks=tuple(
+            replace(item, name=f"PRIVATE_TANK_{item.key}")
+            for item in mbal.default_config().tanks
+        ),
+        out_dir=str(tmp_path / "must-not-exist"),
+    )
+    path = tmp_path / "mbal_config.local.yaml"
+    path.write_text(
+        yaml.safe_dump(mbal.config_to_dict(cfg), sort_keys=False), encoding="utf-8"
+    )
+
+    assert mbal.main(["--config", str(path), "--check-openserver"]) == 1
+    assert "Windows-only" in capsys.readouterr().err
+    assert not (tmp_path / "must-not-exist").exists()

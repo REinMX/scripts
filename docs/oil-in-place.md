@@ -353,7 +353,7 @@ story. Leave `role: upside` on C unless the deeper sand is no longer
 optional. Re-run:
 
 ```bash
-python mbal.py --config example.yaml --dry-run --n 800
+python mbal.py --config mbal_config.local.yaml --dry-run --n 800
 ```
 
 Check that P50(C) is still 0 and that base P50 is still well below

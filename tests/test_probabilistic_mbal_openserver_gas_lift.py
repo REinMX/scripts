@@ -197,3 +197,13 @@ def test_yaml_gas_lift_config(tmp_path) -> None:
         )
     )
     assert len(samples) == 8
+
+
+def test_legacy_script_modules_reexport_the_shared_api() -> None:
+    import probabilistic_mbal_openserver as legacy
+    import probabilistic_mbal_openserver_gas_lift as legacy_gas_lift
+
+    assert legacy.Config is core.Config
+    assert legacy_gas_lift.Config is core.Config
+    assert callable(legacy.main)
+    assert callable(legacy_gas_lift.main)

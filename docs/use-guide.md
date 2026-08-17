@@ -3,6 +3,12 @@
 Windows + licensed MBAL + OpenServer. Python can live in this repo;
 MBAL must be installed on the same machine.
 
+For the complete work procedure (backup, private local config, printable tag
+sheet, COM smoke test, minimal licensed run, resume, QA, and troubleshooting),
+use [mbal-openserver-runbook.md](mbal-openserver-runbook.md). Never put private
+model values in the committed `example.yaml`; copy that template to
+`mbal_config.local.yaml`, which is ignored by Git.
+
 Theory for the tank volumes: [oil-in-place.md](oil-in-place.md).
 
 ---
@@ -44,12 +50,12 @@ sweep.
 Use this when you change official volumes or `p_connected` and want the
 decision table. MBAL does not need to be open.
 
-1. Edit `official_stoiip` / `p_connected` in `example.yaml`.
+1. Edit `official_stoiip` / `p_connected` in `mbal_config.local.yaml`.
 2. Clear `gas_lift_values` and `water_inj_*_values` (or ignore extra rows).
 3. Run:
 
 ```text
-python mbal.py --config example.yaml --dry-run --n 800
+python mbal.py --config mbal_config.local.yaml --dry-run --n 800
 ```
 
 4. Open `mbal_output/decision_volume_summary.csv`.
@@ -73,7 +79,7 @@ YAML. Deeper sand C stays out of MBAL (`in_model: false`).
 2. Prediction is valid and runs by hand once (green, finishes).
 3. Copy OOIP tags for A and B.
 
-**In YAML** (`example.yaml`)
+**In YAML** (`mbal_config.local.yaml`)
 
 1. `mbal_file:` → full path to the `.mbi`.
 2. `tanks:` `name:` → exact MBAL tank names for A, B, and C.
@@ -89,7 +95,7 @@ water_inj_bhp_values: []
 **Run**
 
 ```text
-python mbal.py --config example.yaml --n 200
+python mbal.py --config mbal_config.local.yaml --n 200
 ```
 
 **Look at**
@@ -114,7 +120,7 @@ Same as Case 2, plus a lift-rate grid.
 4. `{p}` is the prediction-step index (often `1`). Confirm in the
    browser.
 
-**In YAML** — same `example.yaml`, same three tanks
+**In YAML** — same `mbal_config.local.yaml`, same three tanks
 
 1. `gas_lift_well:` → exact well name.
 2. `gas_lift_values:` → rates in **model units** (e.g. MMscf/d), e.g.
@@ -124,9 +130,9 @@ Same as Case 2, plus a lift-rate grid.
 **Dry-run, then licensed**
 
 ```text
-python mbal.py --config example.yaml --dry-run --n 50 --gas-lift-values 0,0.5,1.0
+python mbal.py --config mbal_config.local.yaml --dry-run --n 50 --gas-lift-values 0,0.5,1.0
 
-python mbal.py --config example.yaml --n 200
+python mbal.py --config mbal_config.local.yaml --n 200
 ```
 
 **Look at** `gas_lift_sensitivity.csv` / `.png` — field oil vs lift
@@ -154,7 +160,7 @@ rate and BHP; MBAL splits the water.
      `tags.water_inj_bhp`
 6. Save.
 
-**In YAML** — same `example.yaml`, same three tanks
+**In YAML** — same `mbal_config.local.yaml`, same three tanks
 
 1. `water_inj_well:` → exact injector name.
 2. `water_inj_control:`
@@ -174,9 +180,9 @@ until tags validate.
 **Dry-run, then licensed**
 
 ```text
-python mbal.py --config example.yaml --dry-run --n 20
+python mbal.py --config mbal_config.local.yaml --dry-run --n 20
 
-python mbal.py --config example.yaml --n 200
+python mbal.py --config mbal_config.local.yaml --n 200
 ```
 
 If tag validation fails, the printed string is wrong for your IPM
@@ -233,7 +239,7 @@ true zero). `np_C` appears in the results.
 ## If a licensed run stops
 
 ```text
-python mbal.py --config example.yaml
+python mbal.py --config mbal_config.local.yaml
 ```
 
 Same `out_dir` / `out_csv` / seed / YAML. Failed rows are retried;
@@ -242,7 +248,7 @@ Same `out_dir` / `out_csv` / seed / YAML. Failed rows are retried;
 Rebuild plots from a finished CSV:
 
 ```text
-python mbal.py --config example.yaml --summarize-only
+python mbal.py --config mbal_config.local.yaml --summarize-only
 ```
 
 ---

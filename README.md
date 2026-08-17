@@ -1,15 +1,37 @@
 # Engineering scripts
 
-One command, one config, three tanks (working official 4.5 / 3.0 / 6.5 MSm³).
+One maintained command and a public anonymized YAML template. Keep all real
+model names, paths, tags, priors, and results in a gitignored local config.
 
 | File | Role |
 |------|------|
 | `mbal.py` | The only command you run |
 | `mbal_core.py` | Library (sampling, OpenServer, resume, summarize) |
-| `example.yaml` | This well: three tanks, optional lift and injection |
+| `example.yaml` | Public anonymized template; copy it, never put private values in it |
+| `docs/mbal-openserver-runbook.md` | Full work runbook: open corrected MBAL model, collect tags, smoke test, run, resume |
 | `docs/use-guide.md` | Step-by-step with MBAL open, one section per case |
 | `docs/oil-in-place.md` | Why official ≠ P50, connectivity, upside sand, how to present |
 | `docs/statistics.md` | Every statistical term this prints, in plain words, and the traps |
+| `probabilistic_mbal_openserver*.py` | Compatibility entry points that call the same maintained core |
+
+**At work, start here:**
+[MBAL/OpenServer runbook — corrected model to campaign](docs/mbal-openserver-runbook.md).
+It starts by opening MBAL, loading the corrected `.mbi`, making a backup, and
+copying the exact version-specific OpenServer strings without guessing.
+
+## Private local configuration
+
+Do not edit the committed template with work data:
+
+```powershell
+Copy-Item .\example.yaml .\mbal_config.local.yaml
+git check-ignore -v -- .\mbal_config.local.yaml
+python mbal.py --config .\mbal_config.local.yaml --validate-config
+```
+
+`*.local.yaml`, `.mbi` files, `work/`, and generated MBAL outputs are ignored.
+Before any commit, still inspect `git diff`, `git diff --cached`, and search for
+every private object name. Never commit asset identifiers or licensed results.
 
 ## Design
 
@@ -68,25 +90,31 @@ pip install -r requirements.txt
 
 ## Run
 
-Always the same three tanks. Enable a case by filling the matching list
-in `example.yaml` or on the command line.
+Enable a case by filling the matching list in your gitignored
+`mbal_config.local.yaml` or on the command line.
 
 ```bash
 # Volume table only (no MBAL)
-python mbal.py --config example.yaml --dry-run --n 800
+python mbal.py --config mbal_config.local.yaml --dry-run --n 800
+
+# Static readiness: no output, COM, or MBAL
+python mbal.py --config mbal_config.local.yaml --validate-config
+
+# Windows smoke test: open model and read configured inputs; no writes/prediction
+python mbal.py --config mbal_config.local.yaml --check-openserver
 
 # Licensed prediction (Windows)
-python mbal.py --config example.yaml --n 200
+python mbal.py --config mbal_config.local.yaml --n 200
 
 # Gas lift on the same three tanks
-python mbal.py --config example.yaml --dry-run --n 200 --gas-lift-values 0,0.5,1.0
+python mbal.py --config mbal_config.local.yaml --dry-run --n 200 --gas-lift-values 0,0.5,1.0
 
 # Water injector on the same three tanks
-python mbal.py --config example.yaml --dry-run --n 200 \
+python mbal.py --config mbal_config.local.yaml --dry-run --n 200 \
     --water-inj-rate-values 0,300,600 --water-inj-bhp-values 250,300
 
 python mbal.py --out-dir mbal_output --summarize-only
-python mbal.py --write-example-config my_field.yaml
+python mbal.py --write-example-config mbal_config.local.yaml
 ```
 
 `summary_percentiles.csv` reports volumes once per volume realization.

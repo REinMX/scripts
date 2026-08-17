@@ -9,12 +9,30 @@ venv/
 .mypy_cache/
 .DS_Store
 
+# Private/local MBAL material (never commit)
+*.local.yaml
+*.local.yml
+local_config*.yaml
+local_config*.yml
+private/
+work/
+*.mbi
+*.mbi.*
+
 # Run outputs
+mbal_output/
 mbal_mc_output/
 mbal_gas_lift_output/
+mbal_*_output/
+output/
+outputs/
 **/mbal_run.log
 **/samples_dry_run.csv
 **/summary_percentiles.csv
 **/run_metadata.csv
 **/gas_lift_sensitivity.csv
+**/water_inj_sensitivity.csv
+**/decision_volume_summary.csv
+**/mbal_results.csv
+**/mbal_*_results.csv
 **/*.png
