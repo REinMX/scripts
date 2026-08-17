@@ -9,6 +9,7 @@ model names, paths, tags, priors, and results in a gitignored local config.
 | `mbal_core.py` | Library (sampling, OpenServer, resume, summarize) |
 | `example.yaml` | Public anonymized template; copy it, never put private values in it |
 | `docs/mbal-openserver-runbook.md` | Full work runbook: open corrected MBAL model, collect tags, smoke test, run, resume |
+| `docs/ipm-openserver-mbal-chapter-5-2025.md` | Saved 2025 Chapter 5 implementation reference supplied for this correction |
 | `docs/use-guide.md` | Step-by-step with MBAL open, one section per case |
 | `docs/oil-in-place.md` | Why official ≠ P50, connectivity, upside sand, how to present |
 | `docs/statistics.md` | Every statistical term this prints, in plain words, and the traps |
@@ -67,13 +68,13 @@ Gas-lift rate, water-injection rate and injector BHP are **controls**, not
 volume uncertainty. Each is a deterministic sweep paired across every
 volume realization (Cartesian product if more than one list is set).
 
-Add **one** water injector in the `.mbi` and link it to both tanks. This
-code sets well-level rate and BHP; MBAL allocates between tanks from
-injectivity and pressure. OpenServer names follow the Petex *IPM
-OpenServer User Manual* (January 2011) MBAL `PREDWELL` / `PREDINP`
-block (`TYPE=WATINJ`, `MAXRATE`, `MINRATE`, `CONSTFBHP`, `MAXFBHP`,
-`PERFORMTYPE=CFBHP`, `PREDINP.WATINJ`, `CONSTRAINT.MAXINJWATRATE`).
-Copy the exact strings from MBAL's browser for your IPM version.
+Add **one** water injector in the `.mbi` and link it to both tanks. The
+2025 manual places water-rate controls in
+`PREDINP.CONSTRAINT[i].MININJWATRATE/MAXINJWATRATE`; well BHP controls
+remain in `PREDWELL[{well}].CONSTFBHP/MAXFBHP`. MBAL allocates between
+tanks from injectivity and pressure. Gas-lift availability is
+`PREDINP.CONSTRAINT[i].MAX_GASLIFT`. Copy the exact strings from MBAL's
+browser and verify result fields/units for the installed version.
 
 Step-by-step with MBAL open (volume-only, producer, gas lift, injector,
 deeper sand): [docs/use-guide.md](docs/use-guide.md).
@@ -149,6 +150,7 @@ tanks:
   - key: A
     name: Upper
     index: 0
+    result_index: 1             # TRES[2] sheet; sheet 0 is consolidated
     official_stoiip: 4.5      # working mapped connected-case; will change
     connectivity:
       { kind: two_section, p_connected: 0.30, isolated_fraction: 0.50,
@@ -156,13 +158,17 @@ tanks:
   - key: B
     name: Lower
     index: 1
+    result_index: 2
     official_stoiip: 3.0
     connectivity:
       { kind: two_section, p_connected: 0.35, isolated_fraction: 0.50,
         group: base_sands }
 
 tags:
-  tank_stoiip: 'MBAL.MB[0].TANK[{i}].OIIP("{u}")'
+  tank_stoiip: 'MBAL.MB[0].TANK[{i}].OOIP'
+  gas_lift_rate: 'MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAX_GASLIFT'
+  cmd_run_pred: MBAL.MB.RunPrediction
+  res_nsteps: 'MBAL.MB[0].TRES[2][{r}].COUNT'
   # ...
 ```
 
@@ -173,8 +179,11 @@ plus `connectivity`. The older `fmu_residual` and `independent` models and
 per-tank `stoiip:` draws were removed; configs using them fail with a
 pointer to the replacement.
 
-**Always** copy exact OpenServer variable names from MBAL’s browser into `tags`
-before a licensed run — strings differ by IPM version.
+`TRES` prediction results use stream index `2`. In multi-tank cases, result
+sheet `0` is consolidated and the following sheets are tanks; set
+`tanks[].result_index` explicitly when numeric result tags are used. **Always**
+copy exact OpenServer variable names from MBAL’s browser into `tags` before a
+licensed run—especially result column names and unit qualifiers.
 
 ## Outputs
 

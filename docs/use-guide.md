@@ -17,12 +17,12 @@ Theory for the tank volumes: [oil-in-place.md](oil-in-place.md).
 
 1. Open your `.mbi`.
 2. Confirm a **prediction** is already set up (dates, wells, constraints).
-   This script only calls `PREDICTION.CALCULATE`. It does not build the
+   This script only calls `MBAL.MB.RunPrediction`. It does not build the
    prediction from scratch.
 3. Write down the **exact** tank names and well names (case-sensitive).
 4. Copy OpenServer strings from MBAL:
-   - Put the mouse on the input (tank OOIP, gas-lift rate, injector
-     MAXRATE, CONSTFBHP, …).
+   - Put the mouse on the input (tank OOIP, prediction-constraint
+     `MAX_GASLIFT`/`MAXINJWATRATE`, injector `CONSTFBHP`, …).
    - **Ctrl + Right-click** → copy the access string.
    - Paste that string into `tags:` in the YAML. `{tank}`, `{well}`,
      `{p}` stay as placeholders; names go in `tanks:` / `water_inj_well`
@@ -78,6 +78,9 @@ YAML. Deeper sand C stays out of MBAL (`in_model: false`).
 1. Tanks A and B exist and are linked to the oil producer.
 2. Prediction is valid and runs by hand once (green, finishes).
 3. Copy OOIP tags for A and B.
+4. Verify tank result sheets in `TRES[2]`: sheet 0 is consolidated in a
+   multi-tank case; tank sheets follow from 1. Set `result_index` if using
+   numeric result tags.
 
 **In YAML** (`mbal_config.local.yaml`)
 
@@ -113,18 +116,19 @@ Same as Case 2, plus a lift-rate grid.
 **In MBAL**
 
 1. Producer is a gas-lift well (`TYPE` includes lift).
-2. Prediction has a gas-lift rate you can edit.
-3. Ctrl+Right-click the gas-lift rate → paste into
-   `tags.gas_lift_rate` if it is not already
-   `PREDWELL[{well}][{p}].GASLIFTRATE`.
-4. `{p}` is the prediction-step index (often `1`). Confirm in the
-   browser.
+2. Prediction has a gas-lift limit you can edit.
+3. Ctrl+Right-click the prediction constraint → paste into
+   `tags.gas_lift_rate`. The 2025 hierarchy is
+   `PREDINP.CONSTRAINT[{p}].MAX_GASLIFT`.
+4. `{p}` is the prediction-constraint row index (often `1`, but never
+   assume it). Confirm it in the browser.
 
 **In YAML** — same `mbal_config.local.yaml`, same three tanks
 
-1. `gas_lift_well:` → exact well name.
-2. `gas_lift_values:` → rates in **model units** (e.g. MMscf/d), e.g.
+1. `gas_lift_values:` → rates in **model units** (e.g. MMscf/d), e.g.
    `[0, 0.5, 1.0, 1.5]`.
+2. The default `MAX_GASLIFT` tag is field-level and does not use
+   `gas_lift_well`; that name is only needed for a custom verified per-well tag.
 3. Leave `water_inj_*_values` empty unless you also want that grid.
 
 **Dry-run, then licensed**
@@ -154,7 +158,10 @@ rate and BHP; MBAL splits the water.
 4. Run the prediction once by hand with a dummy rate so you know it
    solves.
 5. Ctrl+Right-click and copy:
-   - injector **max rate** → `tags.water_inj_rate`
+   - prediction **maximum injection-water rate**
+     (`PREDINP.CONSTRAINT[i].MAXINJWATRATE`) → `tags.water_inj_rate`
+   - prediction **minimum injection-water rate**
+     (`MININJWATRATE`) → `tags.water_inj_min_rate` for fixed-rate mode
    - injector **max FBHP** → `tags.water_inj_max_fbhp`
    - injector **constant FBHP** (if you use `control: bhp`) →
      `tags.water_inj_bhp`
@@ -194,6 +201,10 @@ version. Copy again from the browser; do not guess.
   per BHP)
 - `decision_volume_summary.csv` — volumes (same every rate)
 - results CSV — `wi_*` is cumulative water injected if the tag exists
+
+Chapter 5 does not spell out the optional TRES cumulative-water field names in
+the supplied extraction. Add `res_cumwat`/`res_cumwatinj` only after copying and
+probing those exact result columns; otherwise `wp_*`/`wi_*` remain `NaN`.
 
 ---
 

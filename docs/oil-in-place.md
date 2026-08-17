@@ -248,9 +248,10 @@ write on each tank for that realization.
   MBAL does not see a zero OOIP. Recovery factor still uses the sampled
   0 and is NaN.
 
-OpenServer names for the injector are from the Petex *IPM OpenServer
-User Manual* (January 2011), MBAL `PREDWELL` / `PREDINP`. Copy the
-exact strings from the browser for your IPM version.
+OpenServer names follow the 2025 MBAL Chapter 5 hierarchy. Water-rate controls
+are `PREDINP.CONSTRAINT[i].MININJWATRATE/MAXINJWATRATE`; injector BHP controls
+are under `PREDWELL`. Copy the exact strings from the browser for the installed
+IPM version.
 
 ---
 
@@ -363,9 +364,11 @@ official A+B. Then, and only then, run the licensed MBAL sweep.
 
 ## 10. References used for the implementation
 
-- Petroleum Experts, *IPM OpenServer User Manual* (January 2011), Part 5
-  MBAL: `PREDINP`, `PREDWELL` (`TYPE=WATINJ`, `MAXRATE`, `MINRATE`,
-  `CONSTFBHP`, `MAXFBHP`, `PERFORMTYPE`, `CONSTRAINT.MAXINJWATRATE`).
+- Petroleum Experts, *IPM OpenServer User Guide* (2025), Chapter 5 MBAL:
+  `OOIP`, `AQUIF.VOLUME`, `PREDINP.CONSTRAINT[i].MAX_GASLIFT`,
+  `MININJWATRATE`/`MAXINJWATRATE`, `PREDWELL.CONSTFBHP`/`MAXFBHP`,
+  `MBAL.MB.RunPrediction`, and prediction results under `TRES[2]`. The saved
+  implementation reference is `ipm-openserver-mbal-chapter-5-2025.md`.
 - Equinor FMU / ERT residual practice: a **global volume multiplier**
   plus a **local residual**, not independent tank totals treated as
   independent geomodel outcomes. Applied here only as `field_scale` on

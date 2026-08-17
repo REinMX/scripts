@@ -46,9 +46,10 @@ def tank(
 
 def index_cfg(**kwargs) -> mbal.Config:
     """Config pinned to index-based OpenServer tags."""
+    tags = kwargs.pop("tags", dict(mbal.DEFAULT_INDEX_TAGS))
     return mbal.Config(
         tag_mode="index",
-        tags=dict(mbal.DEFAULT_INDEX_TAGS),
+        tags=tags,
         unit_stoiip="MMstb",
         unit_press="psig",
         unit_cum="MMstb",
@@ -139,6 +140,8 @@ def test_arbitrary_number_of_tanks_is_supported() -> None:
 
 
 def test_aquifer_multiplier_is_configured_and_sampled_per_tank() -> None:
+    tags = dict(mbal.DEFAULT_INDEX_TAGS)
+    tags["aquifer_mult"] = "MBAL.MB[0].TANK[{i}].CUSTOM_AQUIFER_MULTIPLIER"
     cfg = index_cfg(
         tanks=(
             tank("A", 0, 30.0, uniform(0.5, 1.5)),
@@ -146,6 +149,7 @@ def test_aquifer_multiplier_is_configured_and_sampled_per_tank() -> None:
         ),
         n_realizations=100,
         seed=3,
+        tags=tags,
     )
 
     samples = mbal.build_sample_table(cfg)
@@ -163,11 +167,14 @@ class RecordingServer:
 
 
 def test_apply_realization_uses_each_tanks_index_and_own_values() -> None:
+    tags = dict(mbal.DEFAULT_INDEX_TAGS)
+    tags["aquifer_mult"] = "MBAL.MB[0].TANK[{i}].CUSTOM_AQUIFER_MULTIPLIER"
     cfg = index_cfg(
         tanks=(
             tank("East", 3, 20.0, fixed(1.2)),
             tank("West", 8, 70.0),
-        )
+        ),
+        tags=tags,
     )
     row = pd.Series({"stoiip_East": 21.0, "aq_mult_East": 1.3, "stoiip_West": 73.0})
     server = RecordingServer()
@@ -175,10 +182,40 @@ def test_apply_realization_uses_each_tanks_index_and_own_values() -> None:
     mbal.apply_realization(server, row, cfg)
 
     assert server.values == [
-        ('MBAL.MB[0].TANK[3].OIIP("MMstb")', 21.0),
-        ("MBAL.MB[0].TANK[3].AQUIFER.VOLRATIO", 1.3),
-        ('MBAL.MB[0].TANK[8].OIIP("MMstb")', 73.0),
+        ("MBAL.MB[0].TANK[3].OOIP", 21.0),
+        ("MBAL.MB[0].TANK[3].CUSTOM_AQUIFER_MULTIPLIER", 1.3),
+        ("MBAL.MB[0].TANK[8].OOIP", 73.0),
     ]
+
+
+def test_default_tags_follow_the_2025_mbal_openserver_manual() -> None:
+    index_tags = mbal.DEFAULT_INDEX_TAGS
+    name_tags = mbal.DEFAULT_NAME_TAGS
+
+    assert index_tags["tank_stoiip"] == "MBAL.MB[0].TANK[{i}].OOIP"
+    assert index_tags["aquifer_volume"] == "MBAL.MB[0].TANK[{i}].AQUIF.VOLUME"
+    assert (
+        index_tags["gas_lift_rate"]
+        == "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAX_GASLIFT"
+    )
+    assert (
+        index_tags["water_inj_rate"]
+        == "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAXINJWATRATE"
+    )
+    assert (
+        index_tags["water_inj_min_rate"]
+        == "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MININJWATRATE"
+    )
+    assert index_tags["cmd_run_pred"] == "MBAL.MB.RunPrediction"
+    assert index_tags["res_nsteps"] == "MBAL.MB[0].TRES[2][{r}].COUNT"
+    assert "PREDICTION.RESULTS" not in " ".join(index_tags.values())
+
+    cfg = mbal.Config(
+        tanks=(tank("A", 0, 10.0),),
+        tags=dict(name_tags),
+        tag_mode="name",
+    )
+    assert core._stoiip_tag(cfg, cfg.tanks[0]) == "MBAL.MB[0].TANK[{Tank A}].OOIP"
 
 
 def test_new_result_record_has_stable_columns_before_a_failed_run() -> None:
@@ -288,6 +325,7 @@ def test_yaml_config_roundtrip(tmp_path) -> None:
     cfg = mbal.load_config_yaml(path)
     mbal.validate_config(cfg)
     assert len(cfg.tanks) == 3
+    assert [tank.result_index for tank in cfg.tanks] == [1, 2, 3]
     assert cfg.tag_mode == "name"
     assert cfg.volume_model.kind == "connected_volume"
     samples = mbal.build_sample_table(
@@ -312,12 +350,8 @@ def test_dry_run_cli(tmp_path) -> None:
     assert (out / "summary_percentiles.csv").exists()
 
 
-def test_missing_step_count_warns_before_reading_results_index_zero(caplog) -> None:
-    """Index 0 is the FIRST step wherever MBAL returns a time series.
-
-    Falling back to it silently would report ~0 cumulative oil for every
-    realization while still marking each run 'ok'.
-    """
+def test_unreadable_step_count_fails_instead_of_reading_results_index_zero() -> None:
+    """COUNT is required: row zero is the first prediction step, not the last."""
     cfg = mbal.Config(tanks=(tank("A", 0, 10.0),))
 
     class StubServer:
@@ -330,39 +364,57 @@ def test_missing_step_count_warns_before_reading_results_index_zero(caplog) -> N
                 raise RuntimeError("OpenServer error 1 on DoGet")
             return 1.0
 
-    core._WARNED_ONCE.clear()
     server = StubServer()
     row = pd.Series({"stoiip_A": 10.0})
 
-    with caplog.at_level("WARNING", logger="mbal"):
-        results = mbal.read_results(server, cfg, row)
-
-    assert results["np_A"] == 1.0
-    assert any("index 0" in message for message in caplog.messages)
-    assert any("[0][0]" in read for read in server.reads)
-
-    # Once per run, not once per realization.
-    caplog.clear()
-    with caplog.at_level("WARNING", logger="mbal"):
+    with pytest.raises(RuntimeError, match="COUNT"):
         mbal.read_results(server, cfg, row)
-    assert not caplog.messages
+    assert all("[0]" not in read.split(".COUNT")[0][-3:] for read in server.reads)
 
 
 def test_readable_step_count_reads_the_last_step_without_warning(caplog) -> None:
-    cfg = mbal.Config(tanks=(tank("A", 0, 10.0),))
+    configured_tank = replace(tank("A", 0, 10.0), result_index=7)
+    cfg = index_cfg(tanks=(configured_tank,))
 
     class StubServer:
+        def __init__(self) -> None:
+            self.reads: list[str] = []
+
         def get(self, tag: str) -> float:
+            self.reads.append(tag)
             return 25.0 if "COUNT" in tag else 1.0
 
-    core._WARNED_ONCE.clear()
+    server = StubServer()
     with caplog.at_level("WARNING", logger="mbal"):
-        mbal.read_results(StubServer(), cfg, pd.Series({"stoiip_A": 10.0}))
+        mbal.read_results(server, cfg, pd.Series({"stoiip_A": 10.0}))
     assert not caplog.messages
+    assert "MBAL.MB[0].TRES[2][7].COUNT" in server.reads
+    assert any("[2][7][24]" in tag for tag in server.reads)
 
 
-def test_gas_lift_tag_uses_the_configured_well_index() -> None:
-    """Index tag mode must address the named well, not always PREDWELL[0]."""
+def test_single_tank_defaults_to_tres_sheet_zero() -> None:
+    configured_tank = tank("A", 0, 10.0)
+    cfg = index_cfg(tanks=(configured_tank,))
+
+    assert core._format_result_tag(cfg, "res_nsteps", configured_tank) == (
+        "MBAL.MB[0].TRES[2][0].COUNT"
+    )
+    mbal.validate_config(replace(cfg, tanks=(replace(configured_tank, result_index=0),)))
+
+
+def test_multi_tank_rejects_consolidated_or_duplicate_result_sheets() -> None:
+    tank_a = replace(tank("A", 0, 10.0), result_index=0)
+    tank_b = replace(tank("B", 1, 10.0), result_index=1)
+
+    with pytest.raises(ValueError, match="sheet 0 is consolidated"):
+        mbal.validate_config(index_cfg(tanks=(tank_a, tank_b)))
+
+    duplicate_a = replace(tank_a, result_index=1)
+    with pytest.raises(ValueError, match="duplicate result_index"):
+        mbal.validate_config(index_cfg(tanks=(duplicate_a, tank_b)))
+
+
+def test_gas_lift_tag_uses_the_prediction_constraint_index() -> None:
     cfg = mbal.Config(
         tag_mode="index",
         tags=dict(mbal.DEFAULT_INDEX_TAGS),
@@ -371,12 +423,18 @@ def test_gas_lift_tag_uses_the_configured_well_index() -> None:
         gas_lift_prediction_index=1,
         gas_lift_values=(0.0, 1.0),
     )
-    assert core._gas_lift_tag(cfg) == "MBAL.MB[0].PREDWELL[3][1].GASLIFTRATE"
+    assert (
+        core._gas_lift_tag(cfg)
+        == "MBAL.MB[0].PREDINP.CONSTRAINT[1].MAX_GASLIFT"
+    )
 
     named = replace(
         cfg, tag_mode="name", tags=dict(mbal.DEFAULT_NAME_TAGS)
     )
-    assert core._gas_lift_tag(named) == "MBAL.MB[0].PREDWELL[INJ-2][1].GASLIFTRATE"
+    assert (
+        core._gas_lift_tag(named)
+        == "MBAL.MB[0].PREDINP.CONSTRAINT[1].MAX_GASLIFT"
+    )
 
 
 def test_aquifer_distribution_without_its_tag_is_rejected_up_front() -> None:
@@ -386,10 +444,60 @@ def test_aquifer_distribution_without_its_tag_is_rejected_up_front() -> None:
     with pytest.raises(ValueError, match="aquifer_mult"):
         mbal.validate_config(cfg)
 
-    # Index-mode defaults ship aquifer_mult but not aquifer_volume.
-    with_volume = replace(tank("A", 0, 10.0), aquifer_volume=fixed(1.0))
-    with pytest.raises(ValueError, match="aquifer_volume"):
-        mbal.validate_config(index_cfg(tanks=(with_volume,)))
+    # Both modes ship the manual's TANK.AQUIF.VOLUME tag.
+    with_volume = replace(
+        tank("A", 0, 10.0),
+        aquifer_multiplier=None,
+        aquifer_volume=fixed(1.0),
+    )
+    mbal.validate_config(index_cfg(tanks=(with_volume,)))
+
+
+def test_openserver_rejects_strings_above_the_manual_limit() -> None:
+    core._validate_openserver_string("x" * 65_500, "test")
+    with pytest.raises(ValueError, match="65500-character"):
+        core._validate_openserver_string("x" * 65_501, "test")
+
+
+def test_com_wrapper_uses_documented_direct_openserver_methods() -> None:
+    class FakeCom:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def DoCommand(self, command: str) -> int:
+            self.calls.append(("DoCommand", command))
+            return 0
+
+        def SetValue(self, tag: str, value: float | str) -> int:
+            self.calls.append(("SetValue", tag, value))
+            return 0
+
+        def GetValue(self, tag: str) -> str:
+            self.calls.append(("GetValue", tag))
+            return "12.5"
+
+        def GetLastError(self, app: str) -> int:
+            self.calls.append(("GetLastError", app))
+            return 0
+
+        def GetErrorDescription(self, error: int) -> str:
+            return f"error {error}"
+
+    com = FakeCom()
+    server = object.__new__(core.OpenServer)
+    server.os = com
+
+    server.cmd("MBAL.START")
+    server.slow_cmd("MBAL.MB.RunPrediction")
+    server.set("MBAL.MB[0].TANK[0].OOIP", 12.5)
+    assert server.get("MBAL.MB[0].TANK[0].OOIP") == 12.5
+    assert com.calls == [
+        ("DoCommand", "MBAL.START"),
+        ("DoCommand", "MBAL.MB.RunPrediction"),
+        ("SetValue", "MBAL.MB[0].TANK[0].OOIP", 12.5),
+        ("GetValue", "MBAL.MB[0].TANK[0].OOIP"),
+        ("GetLastError", "MBAL"),
+    ]
 
 
 def test_summarize_only_without_results_reports_instead_of_tracebacking(

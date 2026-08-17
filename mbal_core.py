@@ -13,9 +13,10 @@ Supports:
 This is a dynamic material-balance model. Tank volumes are inputs to MBAL,
 not a geological realization.
 
-OpenServer well/injector names below follow Petroleum Experts, *IPM OpenServer
-User Manual* (January 2011), Part 5 MBAL: PREDINP / PREDWELL. Copy the exact
-strings from MBAL's browser for your IPM version before a licensed run.
+The default commands and variable hierarchy follow Petroleum Experts, *IPM
+OpenServer User Guide* (2025), Chapter 5 MBAL. Copy the exact result strings
+from MBAL with Ctrl+Right-click before a licensed run because result columns
+and unit qualifiers remain model/version dependent.
 """
 
 from __future__ import annotations
@@ -36,17 +37,7 @@ import numpy as np
 import pandas as pd
 
 LOG = logging.getLogger("mbal")
-
-# Keys already warned about, so a per-realization problem is reported once.
-_WARNED_ONCE: set[str] = set()
-
-
-def _warn_once(key: str, message: str, *args: object) -> None:
-    """Log a warning the first time this key is seen in the process."""
-    if key in _WARNED_ONCE:
-        return
-    _WARNED_ONCE.add(key)
-    LOG.warning(message, *args)
+OPENSERVER_STRING_LIMIT = 65_500
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURATION
@@ -179,6 +170,9 @@ class TankConfig:
     key: str
     name: str
     index: int
+    # TRES sheet index. A single-tank result uses sheet 0. In multi-tank
+    # results sheet 0 is consolidated and tank sheets follow from 1.
+    result_index: int | None = None
     official_stoiip: float | None = None
     aquifer_multiplier: Distribution | None = None
     aquifer_volume: Distribution | None = None
@@ -201,6 +195,7 @@ def _default_exploration_tanks() -> tuple[TankConfig, ...]:
             key="A",
             name="REPLACE_WITH_TANK_A_NAME",
             index=0,
+            result_index=1,
             official_stoiip=4.5,
             role="base",
             connectivity=Connectivity(
@@ -215,6 +210,7 @@ def _default_exploration_tanks() -> tuple[TankConfig, ...]:
             key="B",
             name="REPLACE_WITH_TANK_B_NAME",
             index=1,
+            result_index=2,
             official_stoiip=3.0,
             role="base",
             connectivity=Connectivity(
@@ -229,6 +225,7 @@ def _default_exploration_tanks() -> tuple[TankConfig, ...]:
             key="C",
             name="REPLACE_WITH_DEEPER_SAND_NAME",
             index=2,
+            result_index=3,
             official_stoiip=6.5,
             role="upside",
             in_model=False,
@@ -261,49 +258,43 @@ def _default_exploration_volume_model() -> VolumeModel:
     )
 
 
-# Petex IPM OpenServer User Manual (Jan 2011) MBAL PREDWELL / PREDINP names.
-# Later IPM builds expose some well constraints with a prediction-step index
-# [{p}], matching the GASLIFTRATE pattern already used in this repo.
+# Petex IPM OpenServer User Guide (2025), Chapter 5 MBAL.
+# Prediction TRES stream index 2 is the material-balance prediction stream.
+# In multi-tank TRES, sheet 0 is consolidated and tank sheets start at 1.
 DEFAULT_INDEX_TAGS: dict[str, str] = {
-    "tank_stoiip": 'MBAL.MB[0].TANK[{i}].OIIP("{u}")',
-    "aquifer_mult": "MBAL.MB[0].TANK[{i}].AQUIFER.VOLRATIO",
-    "gas_lift_rate": "MBAL.MB[0].PREDWELL[{i}][{p}].GASLIFTRATE",
-    "water_inj_rate": "MBAL.MB[0].PREDWELL[{i}][{p}].MAXRATE",
-    "water_inj_min_rate": "MBAL.MB[0].PREDWELL[{i}][{p}].MINRATE",
+    "tank_stoiip": "MBAL.MB[0].TANK[{i}].OOIP",
+    "aquifer_volume": "MBAL.MB[0].TANK[{i}].AQUIF.VOLUME",
+    "gas_lift_rate": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAX_GASLIFT",
+    "water_inj_rate": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAXINJWATRATE",
+    "water_inj_min_rate": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MININJWATRATE",
     "water_inj_bhp": "MBAL.MB[0].PREDWELL[{i}].CONSTFBHP",
     "water_inj_max_fbhp": "MBAL.MB[0].PREDWELL[{i}].MAXFBHP",
     "water_inj_perform": "MBAL.MB[0].PREDWELL[{i}].PERFORMTYPE",
     "pred_watinj": "MBAL.MB[0].PREDINP.WATINJ",
-    "pred_max_inj_wat": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAXINJWATRATE",
     "cmd_open": 'MBAL.OPENFILE("{path}")',
-    "cmd_run_pred": "MBAL.MB[0].PREDICTION.CALCULATE",
+    "cmd_run_pred": "MBAL.MB.RunPrediction",
     "cmd_close": "MBAL.SHUTDOWN",
-    "res_nsteps": "MBAL.MB[0].PREDICTION.RESULTS[{i}].COUNT",
-    "res_cumoil": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMOIL("{u}")',
-    "res_pressure": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].PRESSURE("{u}")',
-    "res_cumwat": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMWATER("{u}")',
-    "res_cumwatinj": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMWATINJ("{u}")',
+    "res_nsteps": "MBAL.MB[0].TRES[2][{r}].COUNT",
+    "res_cumoil": 'MBAL.MB[0].TRES[2][{r}][{k}].OILRECOVER("{u}")',
+    "res_pressure": 'MBAL.MB[0].TRES[2][{r}][{k}].TANKPRESS("{u}")',
 }
 
 DEFAULT_NAME_TAGS: dict[str, str] = {
-    "tank_stoiip": "MBAL.MB[0].TANK[{tank}].OOIP",
-    "aquifer_volume": "MBAL.MB[0].TANK[{tank}].AQUIFVOLUME",
-    "gas_lift_rate": "MBAL.MB[0].PREDWELL[{well}][{p}].GASLIFTRATE",
-    "water_inj_rate": "MBAL.MB[0].PREDWELL[{well}][{p}].MAXRATE",
-    "water_inj_min_rate": "MBAL.MB[0].PREDWELL[{well}][{p}].MINRATE",
-    "water_inj_bhp": "MBAL.MB[0].PREDWELL[{well}].CONSTFBHP",
-    "water_inj_max_fbhp": "MBAL.MB[0].PREDWELL[{well}].MAXFBHP",
-    "water_inj_perform": "MBAL.MB[0].PREDWELL[{well}].PERFORMTYPE",
+    "tank_stoiip": "MBAL.MB[0].TANK[{{{tank}}}].OOIP",
+    "aquifer_volume": "MBAL.MB[0].TANK[{{{tank}}}].AQUIF.VOLUME",
+    "gas_lift_rate": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAX_GASLIFT",
+    "water_inj_rate": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAXINJWATRATE",
+    "water_inj_min_rate": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MININJWATRATE",
+    "water_inj_bhp": "MBAL.MB[0].PREDWELL[{{{well}}}].CONSTFBHP",
+    "water_inj_max_fbhp": "MBAL.MB[0].PREDWELL[{{{well}}}].MAXFBHP",
+    "water_inj_perform": "MBAL.MB[0].PREDWELL[{{{well}}}].PERFORMTYPE",
     "pred_watinj": "MBAL.MB[0].PREDINP.WATINJ",
-    "pred_max_inj_wat": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAXINJWATRATE",
     "cmd_open": 'MBAL.OPENFILE("{path}")',
-    "cmd_run_pred": "MBAL.MB[0].PREDICTION.CALCULATE",
+    "cmd_run_pred": "MBAL.MB.RunPrediction",
     "cmd_close": "MBAL.SHUTDOWN",
-    "res_nsteps": "MBAL.MB[0].PREDICTION.RESULTS[{i}].COUNT",
-    "res_cumoil": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMOIL("{u}")',
-    "res_pressure": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].PRESSURE("{u}")',
-    "res_cumwat": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMWATER("{u}")',
-    "res_cumwatinj": 'MBAL.MB[0].PREDICTION.RESULTS[{i}][{k}].CUMWATINJ("{u}")',
+    "res_nsteps": "MBAL.MB[0].TRES[2][{{{tank}}}].COUNT",
+    "res_cumoil": 'MBAL.MB[0].TRES[2][{{{tank}}}][{k}].OILRECOVER("{u}")',
+    "res_pressure": 'MBAL.MB[0].TRES[2][{{{tank}}}][{k}].TANKPRESS("{u}")',
 }
 
 
@@ -327,9 +318,11 @@ class Config:
     )
 
     # --- gas lift (optional) -----------------------------------------------
+    # The 2025 default is field-level PREDINP.CONSTRAINT[p].MAX_GASLIFT.
+    # Well name/index are retained only for custom, version-verified tags.
     gas_lift_well: str = "REPLACE_WITH_GAS_LIFT_WELL_NAME"
     gas_lift_well_index: int = 0  # used by tag_mode 'index' ({i} in the tag)
-    gas_lift_prediction_index: int = 1
+    gas_lift_prediction_index: int = 1  # prediction CONSTRAINT row ({p})
     gas_lift_values: tuple[float, ...] = ()
 
     # --- water injector (optional) ----------------------------------------
@@ -337,7 +330,7 @@ class Config:
     # and MBAL allocates between tanks from injectivity / pressure.
     water_inj_well: str = "REPLACE_WITH_WATER_INJ_WELL_NAME"
     water_inj_well_index: int = 0
-    water_inj_prediction_index: int = 1
+    water_inj_prediction_index: int = 1  # prediction CONSTRAINT row ({p})
     water_inj_rate_values: tuple[float, ...] = ()
     water_inj_bhp_values: tuple[float, ...] = ()
     water_inj_control: str = "rate_with_bhp_limit"
@@ -410,6 +403,9 @@ def _parse_tank(raw: dict[str, Any], position: int) -> TankConfig:
     key = str(raw["key"])
     name = str(raw.get("name", key))
     index = int(raw.get("index", position))
+    result_index = (
+        None if raw.get("result_index") is None else int(raw["result_index"])
+    )
     if raw.get("stoiip") is not None:
         raise ValueError(
             f"tank {key}: per-tank 'stoiip' distributions are no longer "
@@ -445,6 +441,7 @@ def _parse_tank(raw: dict[str, Any], position: int) -> TankConfig:
         key=key,
         name=name,
         index=index,
+        result_index=result_index,
         aquifer_multiplier=aquifer_multiplier,
         aquifer_volume=aquifer_volume,
         official_stoiip=official,
@@ -635,6 +632,8 @@ def config_to_dict(cfg: Config) -> dict[str, Any]:
             "name": tank.name,
             "index": tank.index,
         }
+        if tank.result_index is not None:
+            item["result_index"] = tank.result_index
         if tank.official_stoiip is not None:
             item["official_stoiip"] = tank.official_stoiip
         if tank.residual is not None:
@@ -778,9 +777,10 @@ def validate_config(cfg: Config) -> None:
             )
         if tank.index < 0:
             raise ValueError(f"tank {tank.key}: index must be non-negative")
-        # The tag defaults are split by mode - index mode ships aquifer_mult,
-        # name mode ships aquifer_volume. Catch the mismatch here rather than
-        # letting every realization fail one at a time inside the run loop.
+        if tank.result_index is not None and tank.result_index < 0:
+            raise ValueError(f"tank {tank.key}: result_index must be non-negative")
+        # The manual documents AQUIF.VOLUME. A multiplier needs an explicit,
+        # version-verified custom tag; catch its absence before the run loop.
         if tank.aquifer_multiplier is not None:
             validate_distribution(
                 tank.aquifer_multiplier, f"tank {tank.key} aquifer multiplier"
@@ -801,6 +801,19 @@ def validate_config(cfg: Config) -> None:
                     "tags['aquifer_volume'] is missing; copy the exact string "
                     "from MBAL's OpenServer browser into tags"
                 )
+    modelled_tanks = _tanks_in_model(cfg)
+    if len(modelled_tanks) > 1:
+        result_indices = [
+            tank.result_index if tank.result_index is not None else tank.index + 1
+            for tank in modelled_tanks
+        ]
+        if 0 in result_indices:
+            raise ValueError(
+                "multi-tank result_index cannot be 0 because TRES sheet 0 is consolidated"
+            )
+        if len(result_indices) != len(set(result_indices)):
+            raise ValueError("duplicate result_index values among in-model tanks")
+
     if any(value < 0.0 or not math.isfinite(value) for value in cfg.gas_lift_values):
         raise ValueError("gas-lift sensitivity values must be finite and >= 0")
     if cfg.gas_lift_values and "gas_lift_rate" not in cfg.tags:
@@ -817,6 +830,11 @@ _EXAMPLE_MBAL_FILE = r"C:\Work\Models\two_tank_model.mbi"
 
 def _is_example_value(value: str) -> bool:
     return "REPLACE_WITH_" in value.upper()
+
+
+def _template_uses_object(template: str) -> bool:
+    """Return whether a configurable tag needs a well name or well index."""
+    return "{well}" in template or "{i}" in template
 
 
 def validate_licensed_run_config(
@@ -850,15 +868,26 @@ def validate_licensed_run_config(
         if not tank.name.strip() or _is_example_value(tank.name):
             problems.append(f"tank {tank.key} name is empty or unresolved")
 
-    if cfg.gas_lift_values and (
-        not cfg.gas_lift_well.strip() or _is_example_value(cfg.gas_lift_well)
+    gas_lift_tag = cfg.tags.get("gas_lift_rate", "")
+    if (
+        cfg.gas_lift_values
+        and _template_uses_object(gas_lift_tag)
+        and (not cfg.gas_lift_well.strip() or _is_example_value(cfg.gas_lift_well))
     ):
-        problems.append("gas_lift_well is empty or unresolved")
+        problems.append("gas_lift_well is empty or unresolved for its configured tag")
 
-    if (cfg.water_inj_rate_values or cfg.water_inj_bhp_values) and (
+    water_keys = ["water_inj_rate"] if cfg.water_inj_rate_values else []
+    if cfg.water_inj_bhp_values:
+        water_keys.append(_water_inj_bhp_tag_key(cfg))
+        if cfg.water_inj_control.lower() == "bhp":
+            water_keys.append("water_inj_perform")
+    water_uses_object = any(
+        _template_uses_object(cfg.tags.get(key, "")) for key in water_keys
+    )
+    if water_uses_object and (
         not cfg.water_inj_well.strip() or _is_example_value(cfg.water_inj_well)
     ):
-        problems.append("water_inj_well is empty or unresolved")
+        problems.append("water_inj_well is empty or unresolved for its configured tags")
 
     for key, value in cfg.tags.items():
         if not value.strip() or _is_example_value(value):
@@ -1383,18 +1412,24 @@ class OpenServer:
             raise RuntimeError(f"OpenServer error {code} on {what}: {description}")
 
     def cmd(self, command: str) -> None:
+        _validate_openserver_string(command, "command")
         self._check(self.os.DoCommand(command), command)
 
     def slow_cmd(self, command: str) -> None:
-        """Run a calculation command that may block until MBAL completes."""
-        self._check(self.os.DoSlowCommand(command), command)
+        """Run a calculation command synchronously through the COM interface."""
+        _validate_openserver_string(command, "command")
+        self._check(self.os.DoCommand(command), command)
 
     def set(self, tag: str, value: float | str) -> None:
-        self._check(self.os.DoSet(tag, value), f"DoSet {tag}")
+        _validate_openserver_string(tag, "variable tag")
+        if isinstance(value, str):
+            _validate_openserver_string(value, "SetValue value")
+        self._check(self.os.SetValue(tag, value), f"SetValue {tag}")
 
     def get_raw(self, tag: str) -> Any:
         """Return the raw OpenServer value (numeric or list-keyword string)."""
-        value = self.os.DoGet(tag)
+        _validate_openserver_string(tag, "variable tag")
+        value = self.os.GetValue(tag)
         error = self.os.GetLastError("MBAL")
         if error:
             raise RuntimeError(
@@ -1430,6 +1465,15 @@ class OpenServer:
 # -----------------------------------------------------------------------------
 
 
+def _validate_openserver_string(value: str, label: str) -> None:
+    """Enforce MBAL's documented single-string transfer limit."""
+    if len(value) > OPENSERVER_STRING_LIMIT:
+        raise ValueError(
+            f"OpenServer {label} exceeds the 65500-character transfer limit "
+            f"({len(value)} characters)"
+        )
+
+
 def _stoiip_tag(cfg: Config, tank: TankConfig) -> str:
     template = cfg.tags["tank_stoiip"]
     if cfg.tag_mode.lower() == "name":
@@ -1462,6 +1506,26 @@ def _format_inj_tag(cfg: Config, key: str) -> str:
         p=cfg.water_inj_prediction_index,
         tank="",
         u=cfg.unit_press,
+    )
+
+
+def _result_index(cfg: Config, tank: TankConfig) -> int:
+    if tank.result_index is not None:
+        return tank.result_index
+    if len(_tanks_in_model(cfg)) == 1:
+        return 0
+    return tank.index + 1
+
+
+def _format_result_tag(
+    cfg: Config, key: str, tank: TankConfig, *, step: int = 0
+) -> str:
+    return cfg.tags[key].format(
+        i=tank.index,
+        r=_result_index(cfg, tank),
+        tank=tank.name,
+        k=step,
+        u=cfg.unit_press if key == "res_pressure" else cfg.unit_cum,
     )
 
 
@@ -1561,8 +1625,6 @@ def _apply_water_inj(srv: SetServer, row: pd.Series, cfg: Config) -> None:
         srv.set(_format_inj_tag(cfg, "water_inj_rate"), rate)
         if control == "rate" and "water_inj_min_rate" in cfg.tags:
             srv.set(_format_inj_tag(cfg, "water_inj_min_rate"), rate)
-        if "pred_max_inj_wat" in cfg.tags:
-            srv.set(_format_inj_tag(cfg, "pred_max_inj_wat"), rate)
 
     if has_bhp:
         bhp = float(row["water_inj_bhp"])
@@ -1578,57 +1640,41 @@ def read_results(srv: OpenServer, cfg: Config, row: pd.Series) -> dict[str, floa
     """Read the last prediction state for every configured tank."""
     output: dict[str, float] = {}
     for tank in _tanks_in_model(cfg):
-        # Some IPM versions expose only the final state at index 0, so the
-        # fallback is legitimate — but on a version that returns a time
-        # series, index 0 is the FIRST step and every realization would
-        # report ~0 cumulative oil as a successful run. Say so, loudly.
-        template = cfg.tags.get("res_nsteps")
-        nsteps_tag = template.format(i=tank.index) if template else None
-        last = 0
-        if nsteps_tag is None:
-            _warn_once(
-                "res_nsteps/missing",
-                "tags['res_nsteps'] is not configured - reading prediction results "
-                "at index 0. If this IPM version returns a time series, that is the "
-                "first step and cumulative oil will read as ~0 for every "
-                "realization.",
+        nsteps_tag = _format_result_tag(cfg, "res_nsteps", tank)
+        try:
+            nsteps = int(srv.get(nsteps_tag))
+        except (RuntimeError, TypeError, ValueError) as error:
+            raise RuntimeError(
+                f"cannot read required prediction result COUNT from {nsteps_tag}; "
+                "refusing to fall back to row 0 because it is the first step"
+            ) from error
+        if nsteps <= 0:
+            raise RuntimeError(
+                f"prediction result COUNT from {nsteps_tag} must be positive, "
+                f"got {nsteps}"
             )
-        else:
-            try:
-                last = max(int(srv.get(nsteps_tag)) - 1, 0)
-            except (RuntimeError, TypeError, ValueError):
-                _warn_once(
-                    f"res_nsteps/{nsteps_tag}",
-                    "cannot read step count %s - falling back to prediction results "
-                    "index 0. If this IPM version returns a time series, that is the "
-                    "first step and cumulative oil will read as ~0 for every "
-                    "realization. Check res_nsteps against MBAL's OpenServer "
-                    "browser.",
-                    nsteps_tag,
-                )
+        last = nsteps - 1
 
         cumulative_oil = srv.get(
-            cfg.tags["res_cumoil"].format(i=tank.index, k=last, u=cfg.unit_cum)
+            _format_result_tag(cfg, "res_cumoil", tank, step=last)
         )
-        pressure = srv.get(
-            cfg.tags["res_pressure"].format(i=tank.index, k=last, u=cfg.unit_press)
-        )
-        try:
-            cumulative_water = srv.get(
-                cfg.tags["res_cumwat"].format(i=tank.index, k=last, u=cfg.unit_cum)
-            )
-        except (RuntimeError, KeyError):
-            cumulative_water = float("nan")
+        pressure = srv.get(_format_result_tag(cfg, "res_pressure", tank, step=last))
+        cumulative_water = float("nan")
+        if "res_cumwat" in cfg.tags:
+            try:
+                cumulative_water = srv.get(
+                    _format_result_tag(cfg, "res_cumwat", tank, step=last)
+                )
+            except RuntimeError:
+                cumulative_water = float("nan")
 
         cumulative_inj = float("nan")
         if "res_cumwatinj" in cfg.tags:
             try:
                 cumulative_inj = srv.get(
-                    cfg.tags["res_cumwatinj"].format(
-                        i=tank.index, k=last, u=cfg.unit_cum
-                    )
+                    _format_result_tag(cfg, "res_cumwatinj", tank, step=last)
                 )
-            except (RuntimeError, KeyError):
+            except RuntimeError:
                 cumulative_inj = float("nan")
 
         stoiip = float(row[f"stoiip_{tank.key}"])

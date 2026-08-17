@@ -88,14 +88,14 @@ def test_apply_realization_writes_rate_and_bhp_limit_tags() -> None:
     mbal.apply_realization(server, row, cfg)
 
     assert ("MBAL.MB[0].PREDINP.WATINJ", "YES") in server.values
-    assert ("MBAL.MB[0].PREDWELL[INJ1][1].MAXRATE", 300.0) in server.values
     assert (
         "MBAL.MB[0].PREDINP.CONSTRAINT[1].MAXINJWATRATE",
         300.0,
     ) in server.values
-    assert ("MBAL.MB[0].PREDWELL[INJ1].MAXFBHP", 280.0) in server.values
-    assert ("MBAL.MB[0].TANK[TANK_A].OOIP", 4.1) in server.values
-    assert ("MBAL.MB[0].TANK[TANK_B].OOIP", 2.7) in server.values
+    assert ("MBAL.MB[0].PREDWELL[{INJ1}].MAXFBHP", 280.0) in server.values
+    assert ("MBAL.MB[0].TANK[{TANK_A}].OOIP", 4.1) in server.values
+    assert ("MBAL.MB[0].TANK[{TANK_B}].OOIP", 2.7) in server.values
+    assert not any(".MAXRATE" in tag for tag, _value in server.values)
 
 
 def test_apply_realization_bhp_control_sets_cfbhp() -> None:
@@ -115,8 +115,8 @@ def test_apply_realization_bhp_control_sets_cfbhp() -> None:
 
     mbal.apply_realization(server, row, cfg)
 
-    assert ("MBAL.MB[0].PREDWELL[INJ1].PERFORMTYPE", "CFBHP") in server.values
-    assert ("MBAL.MB[0].PREDWELL[INJ1].CONSTFBHP", 260.0) in server.values
+    assert ("MBAL.MB[0].PREDWELL[{INJ1}].PERFORMTYPE", "CFBHP") in server.values
+    assert ("MBAL.MB[0].PREDWELL[{INJ1}].CONSTFBHP", 260.0) in server.values
 
 
 def test_rate_control_pins_min_rate() -> None:
@@ -136,8 +136,14 @@ def test_rate_control_pins_min_rate() -> None:
 
     mbal.apply_realization(server, row, cfg)
 
-    assert ("MBAL.MB[0].PREDWELL[INJ1][1].MAXRATE", 400.0) in server.values
-    assert ("MBAL.MB[0].PREDWELL[INJ1][1].MINRATE", 400.0) in server.values
+    assert (
+        "MBAL.MB[0].PREDINP.CONSTRAINT[1].MAXINJWATRATE",
+        400.0,
+    ) in server.values
+    assert (
+        "MBAL.MB[0].PREDINP.CONSTRAINT[1].MININJWATRATE",
+        400.0,
+    ) in server.values
 
 
 def test_negative_rate_and_nonpositive_bhp_are_rejected() -> None:

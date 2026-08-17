@@ -10,6 +10,9 @@ Este procedimiento es para ejecutar `mbal.py` (o los nombres históricos
 `probabilistic_mbal_openserver_gas_lift.py`) en el mismo equipo Windows que
 tiene MBAL y OpenServer licenciados.
 
+Referencia guardada para esta revisión:
+[IPM OpenServer 2025 — MBAL Chapter 5](ipm-openserver-mbal-chapter-5-2025.md).
+
 El repositorio es público. Los nombres reales, rutas, tags copiados del modelo,
 volúmenes, resultados y archivos de trabajo deben vivir solamente en archivos
 locales ignorados por Git.
@@ -131,20 +134,25 @@ entrega MBAL.
 
 ### 4.3 Gas lift
 
-1. Abre el control de gas lift del pozo dentro de **esa predicción**.
+1. Abre el control de gas lift dentro de **esa predicción**. En la jerarquía
+   2025, el límite de tasa está en
+   `PREDINP.CONSTRAINT[i].MAX_GASLIFT`, no en el tag antiguo/no documentado
+   `PREDWELL[well][i].GASLIFTRATE`.
 2. Confirma que al modificarlo manualmente cambia el caso que se pretende
    estudiar.
 3. Copia el access string literal.
 4. Anota la unidad de entrada mostrada por MBAL/OpenServer. El script envía el
    número tal cual; no convierte la tasa.
-5. Compara el nombre/índice del pozo y el índice de predicción del string con lo
-   anotado en 4.1.
+5. Comprueba el índice de la fila `CONSTRAINT`. El tag por defecto es de campo y
+   no usa nombre de pozo; un tag por pozo solamente es válido si fue copiado de
+   la instalación.
 
 ### 4.4 Comando y resultados
 
 En el browser/command browser de OpenServer de la versión instalada:
 
 1. Identifica y copia el comando que calcula la predicción ya probada a mano.
+   Para material balance, Chapter 5 documenta `MBAL.MB.RunPrediction`.
 2. Identifica cómo obtener el número de pasos de resultados. Verifica si
    `COUNT` representa cantidad y si el último índice es `COUNT - 1`.
 3. Para **cada tanque**, copia el string de petróleo acumulado final.
@@ -154,7 +162,12 @@ En el browser/command browser de OpenServer de la versión instalada:
 6. Con los resultados de la ejecución manual aún disponibles, lee cada tag y
    compara número y unidad. No aceptes solamente “el tag no da error”.
 7. Solamente cuando dos tanques/pasos confirmen el patrón, sustituye en la copia
-   local las partes variables por `{i}`, `{k}` y `{u}`.
+   local las partes variables por `{i}`/`{r}`, `{tank}`, `{k}` y `{u}`.
+
+Los resultados de predicción son `TRES[2][sheet][row]`. En un modelo
+multi-tanque, `sheet=0` es consolidado y las siguientes hojas son los tanques.
+No reutilices automáticamente el índice del objeto tanque como hoja TRES:
+configura `tanks[].result_index` cuando uses tags numéricos.
 
 `--check-openserver` verifica COM, apertura y lectura de **inputs**. El comando
 de predicción y los result tags se verifican en la corrida mínima de una
@@ -179,12 +192,14 @@ celda por analogía con otra versión.
 | Unidad acumulados (`unit_cum`) | ____________________ | GUI = OpenServer | ☐ |
 | `tag_mode`: nombre o índice | ____________________ | dos tanques comparados | ☐ |
 | Tanque 1: `key`, nombre exacto, índice | ____________________ | árbol + browser | ☐ |
+| Tanque 1: `result_index`/hoja TRES | ____________________ | `TRES[2]`, 0 es consolidado | ☐ |
 | Tanque 1: tag STOIIP literal | ____________________ | lectura coincide | ☐ |
 | Tanque 1: tag acuífero y tipo, si aplica | ____________________ | volumen o multiplicador | ☐ |
 | Tanque 1: tag Np + unidad | ____________________ | terminal manual | ☐ |
 | Tanque 1: tag presión + unidad | ____________________ | terminal manual | ☐ |
 | Tanque 1: tag Wp + unidad, si aplica | ____________________ | terminal manual | ☐ |
 | Tanque 2: `key`, nombre exacto, índice | ____________________ | árbol + browser | ☐ |
+| Tanque 2: `result_index`/hoja TRES | ____________________ | `TRES[2]`, 0 es consolidado | ☐ |
 | Tanque 2: tag STOIIP literal | ____________________ | lectura coincide | ☐ |
 | Tanque 2: tag acuífero y tipo, si aplica | ____________________ | volumen o multiplicador | ☐ |
 | Tanque 2: tag Np + unidad | ____________________ | terminal manual | ☐ |
@@ -225,8 +240,9 @@ Ambos YAML deben aparecer como ignorados (`!!` en la vista de ignorados). Edita
 
 - `mbal_file` y `openserver_prog_id`;
 - `tag_mode`;
-- `tanks[].name`, `tanks[].index`, `in_model` y priors;
-- `gas_lift_well`, índices, unidad y valores;
+- `tanks[].name`, `tanks[].index`, `tanks[].result_index`, `in_model` y priors;
+- índice de `PREDINP.CONSTRAINT`, unidad y valores de gas lift;
+- `gas_lift_well` solamente si un tag por pozo fue verificado y configurado;
 - acuíferos opcionales;
 - `tags` literales/templates ya verificados;
 - unidades y directorios de salida bajo `work\...`.
@@ -344,7 +360,8 @@ python mbal.py --config .\mbal_smoke.local.yaml --n 1 --stop-on-error --out-dir 
 Esta es la primera operación que escribe inputs y calcula. Revisa:
 
 1. exactamente una fila con `status == ok`;
-2. ausencia de warning de fallback a results index 0;
+2. lectura correcta de `TRES[2][sheet].COUNT`; si falla, el programa debe
+   detener la realización y nunca caer a la fila 0;
 3. Np, presión y Wp en unidades correctas;
 4. valores no nulos y sensibles a los inputs;
 5. log sin diálogos ni errores OpenServer.
@@ -428,7 +445,7 @@ Archivos principales:
    actual; la fila ya estará escrita.
 2. Pulsa `Ctrl+C` una sola vez en la consola.
 3. Espera a que MBAL termine el comando bloqueante y cierre la sesión.
-4. Si hay un diálogo MBAL, resuélvelo en la GUI; un `DoSlowCommand` bloqueado
+4. Si hay un diálogo MBAL, resuélvelo en la GUI; un `DoCommand` bloqueado
    dentro de COM no tiene timeout real en este proceso.
 5. Usa Task Manager solamente como último recurso. Después abre la copia de
    trabajo manualmente y comprueba integridad antes de reiniciar.
@@ -529,7 +546,7 @@ En el dry run:
   convergencia o archivos;
 - consigue que la predicción termine a mano sin intervención;
 - vuelve a la corrida `--n 1`;
-- un timeout alrededor de `DoSlowCommand` en el mismo proceso no interrumpe de
+- un timeout alrededor de `DoCommand` en el mismo proceso no interrumpe de
   forma segura un COM bloqueado.
 
 ### Unidades incorrectas
@@ -544,9 +561,8 @@ En el dry run:
 
 - verifica que se calculó la predicción correcta;
 - verifica el comando de cálculo copiado;
-- trata cualquier fallback a result index 0 como bloqueo hasta confirmar que
-  esa versión expone solamente el estado final en 0;
-- confirma `res_nsteps`, `{k}` y fecha terminal;
+- el código ya no acepta fallback a result index 0: corrige `res_nsteps`/`COUNT`;
+- confirma stream `2`, hoja `{r}`/`{tank}`, `{k}=COUNT-1` y fecha terminal;
 - revisa si un constraint de tasa hace al caso rate-limited;
 - verifica que se cambió el input del tanque/pozo correcto y que no fue
   sobreescrito por otra regla de predicción.

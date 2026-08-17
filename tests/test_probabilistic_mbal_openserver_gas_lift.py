@@ -116,10 +116,10 @@ def test_apply_realization_uses_verified_name_based_input_tags() -> None:
     mbal.apply_realization(server, row, cfg)
 
     assert server.values == [
-        ("MBAL.MB[0].TANK[BOTTOM_TANK].OOIP", 21.0),
-        ("MBAL.MB[0].TANK[BOTTOM_TANK].AQUIFVOLUME", 110.0),
-        ("MBAL.MB[0].TANK[TOP_TANK].OOIP", 42.0),
-        ("MBAL.MB[0].PREDWELL[LIFTED_WELL][1].GASLIFTRATE", 0.5),
+        ("MBAL.MB[0].TANK[{BOTTOM_TANK}].OOIP", 21.0),
+        ("MBAL.MB[0].TANK[{BOTTOM_TANK}].AQUIF.VOLUME", 110.0),
+        ("MBAL.MB[0].TANK[{TOP_TANK}].OOIP", 42.0),
+        ("MBAL.MB[0].PREDINP.CONSTRAINT[1].MAX_GASLIFT", 0.5),
     ]
 
 
