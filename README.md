@@ -9,7 +9,6 @@ model names, paths, tags, priors, and results in a gitignored local config.
 | `mbal_core.py` | Library (sampling, OpenServer, resume, summarize) |
 | `example.yaml` | Public anonymized template; copy it, never put private values in it |
 | `docs/mbal-openserver-runbook.md` | Full work runbook: open corrected MBAL model, collect tags, smoke test, run, resume |
-| `docs/ipm-openserver-mbal-chapter-5-2025.md` | Saved 2025 Chapter 5 implementation reference supplied for this correction |
 | `docs/use-guide.md` | Step-by-step with MBAL open, one section per case |
 | `docs/oil-in-place.md` | Why official ≠ P50, connectivity, upside sand, how to present |
 | `docs/statistics.md` | Every statistical term this prints, in plain words, and the traps |
@@ -69,7 +68,7 @@ volume uncertainty. Each is a deterministic sweep paired across every
 volume realization (Cartesian product if more than one list is set).
 
 Add **one** water injector in the `.mbi` and link it to both tanks. The
-2025 manual places water-rate controls in
+supported OpenServer hierarchy places water-rate controls in
 `PREDINP.CONSTRAINT[i].MININJWATRATE/MAXINJWATRATE`; well BHP controls
 remain in `PREDWELL[{well}].CONSTFBHP/MAXFBHP`. MBAL allocates between
 tanks from injectivity and pressure. Gas-lift availability is

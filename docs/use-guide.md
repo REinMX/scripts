@@ -118,7 +118,7 @@ Same as Case 2, plus a lift-rate grid.
 1. Producer is a gas-lift well (`TYPE` includes lift).
 2. Prediction has a gas-lift limit you can edit.
 3. Ctrl+Right-click the prediction constraint → paste into
-   `tags.gas_lift_rate`. The 2025 hierarchy is
+   `tags.gas_lift_rate`. The supported hierarchy is
    `PREDINP.CONSTRAINT[{p}].MAX_GASLIFT`.
 4. `{p}` is the prediction-constraint row index (often `1`, but never
    assume it). Confirm it in the browser.
@@ -202,9 +202,9 @@ version. Copy again from the browser; do not guess.
 - `decision_volume_summary.csv` — volumes (same every rate)
 - results CSV — `wi_*` is cumulative water injected if the tag exists
 
-Chapter 5 does not spell out the optional TRES cumulative-water field names in
-the supplied extraction. Add `res_cumwat`/`res_cumwatinj` only after copying and
-probing those exact result columns; otherwise `wp_*`/`wi_*` remain `NaN`.
+Optional TRES cumulative-water field names are deliberately not assumed. Add
+`res_cumwat`/`res_cumwatinj` only after copying and probing those exact result
+columns; otherwise `wp_*`/`wi_*` remain `NaN`.
 
 ---
 

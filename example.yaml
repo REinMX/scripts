@@ -14,7 +14,7 @@
 # Case 4 water injector: fill water_inj_well + rate/bhp lists.
 #
 # OpenServer: Ctrl+Right-click in MBAL and paste exact strings into tags.
-# Defaults follow the 2025 MBAL Chapter 5 hierarchy; result fields/units still
+# Defaults follow the supported MBAL/OpenServer hierarchy; result fields/units still
 # require a one-realization probe against the installed version.
 
 mbal_file: C:\Work\Models\two_tank_model.mbi
@@ -112,6 +112,6 @@ tags:
   res_nsteps: 'MBAL.MB[0].TRES[2][{{{tank}}}].COUNT'
   res_cumoil: 'MBAL.MB[0].TRES[2][{{{tank}}}][{k}].OILRECOVER("{u}")'
   res_pressure: 'MBAL.MB[0].TRES[2][{{{tank}}}][{k}].TANKPRESS("{u}")'
-  # Optional water result names are not explicit in the supplied Chapter 5
-  # extraction. Add res_cumwat/res_cumwatinj only after Ctrl+Right-clicking
+  # Optional water result names are deliberately not assumed. Add
+  # res_cumwat/res_cumwatinj only after Ctrl+Right-clicking
   # the exact result columns and verifying them in a one-realization run.

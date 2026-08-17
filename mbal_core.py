@@ -13,10 +13,9 @@ Supports:
 This is a dynamic material-balance model. Tank volumes are inputs to MBAL,
 not a geological realization.
 
-The default commands and variable hierarchy follow Petroleum Experts, *IPM
-OpenServer User Guide* (2025), Chapter 5 MBAL. Copy the exact result strings
-from MBAL with Ctrl+Right-click before a licensed run because result columns
-and unit qualifiers remain model/version dependent.
+The default commands and variable hierarchy target current MBAL/OpenServer.
+Copy exact result strings from MBAL with Ctrl+Right-click before a licensed run
+because result columns and unit qualifiers remain model/version dependent.
 """
 
 from __future__ import annotations
@@ -258,7 +257,7 @@ def _default_exploration_volume_model() -> VolumeModel:
     )
 
 
-# Petex IPM OpenServer User Guide (2025), Chapter 5 MBAL.
+# MBAL/OpenServer defaults used by this integration.
 # Prediction TRES stream index 2 is the material-balance prediction stream.
 # In multi-tank TRES, sheet 0 is consolidated and tank sheets start at 1.
 DEFAULT_INDEX_TAGS: dict[str, str] = {
@@ -779,8 +778,8 @@ def validate_config(cfg: Config) -> None:
             raise ValueError(f"tank {tank.key}: index must be non-negative")
         if tank.result_index is not None and tank.result_index < 0:
             raise ValueError(f"tank {tank.key}: result_index must be non-negative")
-        # The manual documents AQUIF.VOLUME. A multiplier needs an explicit,
-        # version-verified custom tag; catch its absence before the run loop.
+        # A multiplier needs an explicit, version-verified custom tag; catch
+        # its absence before the run loop.
         if tank.aquifer_multiplier is not None:
             validate_distribution(
                 tank.aquifer_multiplier, f"tank {tank.key} aquifer multiplier"

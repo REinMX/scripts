@@ -10,8 +10,6 @@ Este procedimiento es para ejecutar `mbal.py` (o los nombres históricos
 `probabilistic_mbal_openserver_gas_lift.py`) en el mismo equipo Windows que
 tiene MBAL y OpenServer licenciados.
 
-Referencia guardada para esta revisión:
-[IPM OpenServer 2025 — MBAL Chapter 5](ipm-openserver-mbal-chapter-5-2025.md).
 
 El repositorio es público. Los nombres reales, rutas, tags copiados del modelo,
 volúmenes, resultados y archivos de trabajo deben vivir solamente en archivos
@@ -135,7 +133,7 @@ entrega MBAL.
 ### 4.3 Gas lift
 
 1. Abre el control de gas lift dentro de **esa predicción**. En la jerarquía
-   2025, el límite de tasa está en
+   soportada, el límite de tasa está en
    `PREDINP.CONSTRAINT[i].MAX_GASLIFT`, no en el tag antiguo/no documentado
    `PREDWELL[well][i].GASLIFTRATE`.
 2. Confirma que al modificarlo manualmente cambia el caso que se pretende
@@ -152,7 +150,7 @@ entrega MBAL.
 En el browser/command browser de OpenServer de la versión instalada:
 
 1. Identifica y copia el comando que calcula la predicción ya probada a mano.
-   Para material balance, Chapter 5 documenta `MBAL.MB.RunPrediction`.
+   Para material balance, usa `MBAL.MB.RunPrediction`.
 2. Identifica cómo obtener el número de pasos de resultados. Verifica si
    `COUNT` representa cantidad y si el último índice es `COUNT - 1`.
 3. Para **cada tanque**, copia el string de petróleo acumulado final.
@@ -572,7 +570,7 @@ En el dry run:
 - [ ] Backup `.mbi` intacto y copia de trabajo separada.
 - [ ] Config local y `.mbi` aparecen ignorados por Git.
 - [ ] Config estática, smoke OpenServer, dry run y `--n 1` pasaron.
-- [ ] Comando y result tags se reprodujeron contra MBAL manual.
+- [ ] Comando y result tags se reprodujeron contra una ejecución interactiva en MBAL.
 - [ ] Conteo total, grid pareado y `base_realization` son correctos.
 - [ ] Fallos investigados; no hay filas fallidas aceptadas silenciosamente.
 - [ ] P90 ≤ P50 ≤ P10.

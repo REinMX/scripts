@@ -188,7 +188,7 @@ def test_apply_realization_uses_each_tanks_index_and_own_values() -> None:
     ]
 
 
-def test_default_tags_follow_the_2025_mbal_openserver_manual() -> None:
+def test_default_tags_use_the_supported_mbal_openserver_hierarchy() -> None:
     index_tags = mbal.DEFAULT_INDEX_TAGS
     name_tags = mbal.DEFAULT_NAME_TAGS
 
@@ -444,7 +444,7 @@ def test_aquifer_distribution_without_its_tag_is_rejected_up_front() -> None:
     with pytest.raises(ValueError, match="aquifer_mult"):
         mbal.validate_config(cfg)
 
-    # Both modes ship the manual's TANK.AQUIF.VOLUME tag.
+    # Both modes ship the supported TANK.AQUIF.VOLUME tag.
     with_volume = replace(
         tank("A", 0, 10.0),
         aquifer_multiplier=None,
@@ -453,7 +453,7 @@ def test_aquifer_distribution_without_its_tag_is_rejected_up_front() -> None:
     mbal.validate_config(index_cfg(tanks=(with_volume,)))
 
 
-def test_openserver_rejects_strings_above_the_manual_limit() -> None:
+def test_openserver_rejects_strings_above_the_transfer_limit() -> None:
     core._validate_openserver_string("x" * 65_500, "test")
     with pytest.raises(ValueError, match="65500-character"):
         core._validate_openserver_string("x" * 65_501, "test")
