@@ -288,23 +288,15 @@ trackeado.
 
 ## 7. Configuración científica: tanques independientes
 
-Usa independencia solamente si los marginales de tanque son genuinamente
-independientes. Si comparten mapa, contacto, NTG, barrera o incertidumbre
-deposicional, conserva una dependencia explícita.
+Cada tanque requiere `official_stoiip`. Sin P90/P10, ese volumen es fijo. Con
+ambos límites, `official_stoiip` es el P50 y debe cumplirse
+`0 < P90 < official < P10`.
 
-La implementación actual usa `connected_volume`. Para el caso independiente:
-
-- omite `volume_model.field_scale`;
-- no compartas `connectivity.group`;
-- usa `connectivity_correlation: 0`;
-- si la conectividad no es incierta, usa `p_connected: 1` y da a cada tanque su
-  propio `residual` (multiplicador sobre `official_stoiip`);
-- da a cada acuífero su propia distribución si también es independiente.
-
-Así cada residual/acuífero no fijo recibe su propia dimensión MC/LHS y
-`stoiip_total` se deriva fila por fila como suma. No muestrees un total de campo
-y luego fracciones. Si se requiere una correlación real, modélala y comprueba el
-prior de campo resultante.
+La implementación actual asigna una dimensión MC/LHS propia a cada tanque y
+deriva `stoiip_total` fila por fila como suma. No tiene conectividad, grupos,
+correlación, `field_scale`, multiplicadores residuales ni ajustes del total de
+campo. Si el estudio necesita una dependencia física, debe añadirse como cambio
+explícito del modelo; no la escondas en los tres marginales.
 
 Dry run recomendado para revisar marginales y rangos antes de OpenServer:
 
@@ -430,10 +422,9 @@ Archivos principales:
 | Archivo | Uso |
 |---|---|
 | `mbal_results.csv` o `out_csv` local | inputs, resultados, status y runtime por fila |
-| `summary_percentiles.csv` | percentiles geológicos; no pool operativo |
+| `summary_percentiles.csv` | oficial y P90/P50/P10 de tanque/campo; no pool operativo |
 | `gas_lift_sensitivity.csv` | Np de campo P90/P50/P10 por tasa de lift |
 | `run_metadata.csv` | seed, muestreo y conteos |
-| `decision_volume_summary.csv` | base/upside y diagnóstico de conectividad |
 | `mbal_run.log` | errores, progreso y ETA |
 | `*.png` | histogramas, excedencia y sensibilidades |
 
@@ -483,10 +474,8 @@ La convención O&G usada es P90 = percentil 10 (caso bajo) y P10 = percentil 90
 En el dry run:
 
 - comprueba por fila `stoiip_total == sum(stoiip_<tanque>)`;
-- si se asumió independencia, revisa correlación de rangos aproximadamente
-  nula y que no exista `field_scale` compartido ni grupo correlacionado;
-- si hay dependencia física, comprueba que la matriz y el prior de campo la
-  reflejen; independencia no es un objetivo automático;
+- revisa correlación de rangos aproximadamente nula con una muestra suficiente;
+- confirma que no aparecen columnas de conectividad, escala o residual;
 - no sumes P90/P50/P10 marginales para construir percentiles de campo.
 
 ### Consistencia MBAL

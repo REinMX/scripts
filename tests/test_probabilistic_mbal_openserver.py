@@ -25,22 +25,14 @@ def tank(
     index: int,
     official: float,
     aquifer: mbal.Distribution | None = None,
-    *,
-    residual: mbal.Distribution | None = None,
 ) -> mbal.TankConfig:
-    """A certainly-connected tank, so stoiip_<key> == official x residual."""
+    """A fixed-volume tank for OpenServer plumbing tests."""
     return mbal.TankConfig(
         key=key,
         name=f"Tank {key}",
         index=index,
         official_stoiip=official,
         aquifer_multiplier=aquifer,
-        connectivity=mbal.Connectivity(
-            kind="two_section",
-            p_connected=1.0,
-            isolated_fraction=0.5,
-            residual=residual if residual is not None else fixed(1.0),
-        ),
     )
 
 
@@ -57,73 +49,13 @@ def index_cfg(**kwargs) -> mbal.Config:
     )
 
 
-def test_each_tank_is_sampled_on_its_own_not_split_from_a_field_total() -> None:
-    cfg = mbal.Config(
-        tanks=(
-            tank("A", 0, 15.0, residual=uniform(0.5, 1.5)),
-            tank("B", 1, 150.0, residual=uniform(0.5, 1.5)),
-        ),
-        volume_model=mbal.VolumeModel(),  # no shared field_scale
-        n_realizations=5_000,
-        seed=17,
-        sampling="mc",
-    )
-
-    samples = mbal.build_sample_table(cfg)
-
-    # Residuals are drawn per tank, so the two do not move together...
-    correlation = float(
-        np.corrcoef(samples["residual_A"], samples["residual_B"])[0, 1]
-    )
-    assert abs(correlation) < 0.06
-    assert not np.allclose(samples["residual_A"], samples["residual_B"])
-    # ...and the field total is their sum, not a total carved into shares.
-    np.testing.assert_allclose(
-        samples["stoiip_total"], samples["stoiip_A"] + samples["stoiip_B"]
-    )
-    assert "frac_A" not in samples
-
-
-def test_each_tank_can_have_a_different_distribution_family() -> None:
-    cfg = mbal.Config(
-        tanks=(
-            tank(
-                "A",
-                0,
-                1.0,
-                residual=mbal.Distribution(kind="lognormal", p90=20.0, p10=80.0),
-            ),
-            tank(
-                "B",
-                1,
-                1.0,
-                residual=mbal.Distribution(
-                    kind="triangular", low=10.0, mode=25.0, high=60.0
-                ),
-            ),
-        ),
-        volume_model=mbal.VolumeModel(),
-        n_realizations=4_000,
-        seed=42,
-        sampling="lhs",
-    )
-
-    samples = mbal.build_sample_table(cfg)
-
-    assert np.percentile(samples["stoiip_A"], 10) == pytest.approx(20.0, rel=0.01)
-    assert np.percentile(samples["stoiip_A"], 90) == pytest.approx(80.0, rel=0.01)
-    assert samples["stoiip_B"].between(10.0, 60.0).all()
-    assert samples["stoiip_B"].median() == pytest.approx(30.42, rel=0.02)
-
-
 def test_arbitrary_number_of_tanks_is_supported() -> None:
     cfg = mbal.Config(
         tanks=(
             tank("North", 2, 12.0),
-            tank("Central", 5, 25.0, residual=uniform(0.8, 1.2)),
+            tank("Central", 5, 25.0),
             tank("South", 7, 40.0),
         ),
-        volume_model=mbal.VolumeModel(),
         n_realizations=25,
         seed=9,
     )
@@ -261,25 +193,9 @@ def test_duplicate_tank_keys_are_rejected() -> None:
         mbal.build_sample_table(cfg)
 
 
-def test_invalid_distribution_parameters_are_rejected() -> None:
-    cfg = mbal.Config(
-        tanks=(
-            tank(
-                "A",
-                0,
-                10.0,
-                residual=mbal.Distribution(kind="lognormal", p90=80.0, p10=20.0),
-            ),
-        )
-    )
-
-    with pytest.raises(ValueError, match="p90 must be lower than p10"):
-        mbal.build_sample_table(cfg)
-
-
-def test_percentiles_include_std_and_p95_p5() -> None:
+def test_percentiles_default_to_normal_oil_and_gas_cases_only() -> None:
     stats = mbal.percentiles(np.array([1.0, 2.0, 3.0, 4.0, 5.0]))
-    assert set(stats) >= {"P90", "P50", "P10", "mean", "std", "P95", "P5"}
+    assert set(stats) == {"P90", "P50", "P10", "mean", "std"}
     assert stats["P50"] == pytest.approx(3.0)
     assert stats["std"] == pytest.approx(np.std([1, 2, 3, 4, 5]))
 
@@ -327,7 +243,7 @@ def test_yaml_config_roundtrip(tmp_path) -> None:
     assert len(cfg.tanks) == 3
     assert [tank.result_index for tank in cfg.tanks] == [1, 2, 3]
     assert cfg.tag_mode == "name"
-    assert cfg.volume_model.kind == "connected_volume"
+    assert [tank.p90_stoiip for tank in cfg.tanks] == [3.5, None, 5.0]
     samples = mbal.build_sample_table(
         replace(
             cfg,

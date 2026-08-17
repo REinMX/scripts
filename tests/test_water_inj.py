@@ -12,18 +12,12 @@ import mbal_core as mbal
 
 
 def tank(key: str, name: str, index: int, official: float) -> mbal.TankConfig:
-    """Always-connected tank: the injection tests are about plumbing, not volumes."""
+    """Fixed tank: the injection tests are about plumbing, not volumes."""
     return mbal.TankConfig(
         key=key,
         name=name,
         index=index,
         official_stoiip=official,
-        connectivity=mbal.Connectivity(
-            kind="two_section",
-            p_connected=1.0,
-            isolated_fraction=0.5,
-            residual=mbal.Distribution(kind="lognormal", p90=0.85, p10=1.12),
-        ),
     )
 
 
@@ -35,9 +29,6 @@ def inj_cfg(**kwargs) -> mbal.Config:
     )
     updates = {
         "tanks": tanks,
-        "volume_model": mbal.VolumeModel(
-            field_scale=mbal.Distribution(kind="lognormal", p90=0.70, p10=1.18),
-        ),
         "n_realizations": 8,
         "seed": 4,
         "water_inj_well": "INJ1",
@@ -191,9 +182,8 @@ def test_yaml_water_inj_config(tmp_path) -> None:
     cfg = mbal.load_config_yaml(path, base=mbal.default_config())
     mbal.validate_config(cfg)
     assert cfg.tag_mode == "name"
-    assert cfg.water_inj_rate_values
-    assert cfg.water_inj_bhp_values
-    assert cfg.volume_model.kind == "connected_volume"
+    assert cfg.water_inj_rate_values == ()
+    assert cfg.water_inj_bhp_values == ()
     samples = mbal.build_sample_table(
         replace(
             cfg,

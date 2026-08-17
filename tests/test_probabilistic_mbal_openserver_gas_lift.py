@@ -16,10 +16,6 @@ def fixed(value: float) -> mbal.Distribution:
     return mbal.Distribution(kind="fixed", value=value)
 
 
-def uniform(low: float, high: float) -> mbal.Distribution:
-    return mbal.Distribution(kind="uniform", low=low, high=high)
-
-
 def tank(
     key: str,
     name: str,
@@ -27,29 +23,25 @@ def tank(
     official: float,
     aquifer: mbal.Distribution | None = None,
     *,
-    residual: mbal.Distribution | None = None,
+    p90: float | None = None,
+    p10: float | None = None,
 ) -> mbal.TankConfig:
-    """Always-connected tank, so stoiip_<key> == official x residual."""
+    """Tank with a fixed or direct P90/P50/P10 volume prior."""
     return mbal.TankConfig(
         key=key,
         name=name,
         index=index,
         official_stoiip=official,
+        p90_stoiip=p90,
+        p10_stoiip=p10,
         aquifer_volume=aquifer,
-        connectivity=mbal.Connectivity(
-            kind="two_section",
-            p_connected=1.0,
-            isolated_fraction=0.5,
-            residual=residual if residual is not None else fixed(1.0),
-        ),
     )
 
 
 def name_cfg(**kwargs) -> mbal.Config:
-    """Name-based tags, no shared field_scale unless a test asks for one."""
+    """Name-based tags for gas-lift/OpenServer plumbing tests."""
     base = replace(
         mbal.default_config(),
-        volume_model=mbal.VolumeModel(),
         unit_stoiip="MMstb",
         unit_cum="MMstb",
         unit_press="psig",
@@ -64,8 +56,8 @@ def name_cfg(**kwargs) -> mbal.Config:
 def test_gas_lift_sweep_reuses_each_probabilistic_realization() -> None:
     cfg = name_cfg(
         tanks=(
-            tank("bottom", "BOTTOM_TANK", 0, 1.0, residual=uniform(10.0, 20.0)),
-            tank("top", "TOP_TANK", 1, 1.0, residual=uniform(30.0, 50.0)),
+            tank("bottom", "BOTTOM_TANK", 0, 15.0, p90=10.0, p10=20.0),
+            tank("top", "TOP_TANK", 1, 40.0, p90=30.0, p10=50.0),
         ),
         n_realizations=12,
         seed=7,
@@ -186,7 +178,7 @@ def test_yaml_gas_lift_config(tmp_path) -> None:
     mbal.validate_config(cfg)
     assert cfg.tag_mode == "name"
     assert len(cfg.tanks) == 3
-    assert cfg.tanks[2].role == "upside"
+    assert all(tank.in_model for tank in cfg.tanks)
     samples = mbal.build_sample_table(
         replace(
             cfg,

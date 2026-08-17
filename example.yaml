@@ -1,117 +1,48 @@
-# Public anonymized template. DO NOT put private model paths, object names,
-# OpenServer strings, asset priors, or work data in this committed file.
-# Copy it to the gitignored mbal_config.local.yaml and edit only that copy.
-# The numerical values below are examples and are not licensed-run defaults.
+# Public anonymized template. Copy this file to mbal_config.local.yaml and
+# keep real paths, tank names, priors, and results out of Git.
 #
-# Single connected-volume example with three tanks.
-#   python mbal.py --config example.yaml --dry-run --n 200
-#   python mbal.py --config example.yaml --n 200
-#
-# Case 1 volume only: keep the inj/lift lists empty (or use --dry-run and
-#   ignore the extra rows).
-# Case 2 producer: water_inj_* and gas_lift_values empty.
-# Case 3 gas lift: fill gas_lift_well + gas_lift_values.
-# Case 4 water injector: fill water_inj_well + rate/bhp lists.
-#
-# OpenServer: Ctrl+Right-click in MBAL and paste exact strings into tags.
-# Defaults follow the supported MBAL/OpenServer hierarchy; result fields/units still
-# require a one-realization probe against the installed version.
+# Dry run:
+#   python mbal.py --config mbal_config.local.yaml --dry-run --n 200
+# Licensed Windows run:
+#   python mbal.py --config mbal_config.local.yaml --n 200
 
-mbal_file: C:\Work\Models\two_tank_model.mbi
+mbal_file: C:\Work\Models\three_tank_model.mbi
 tag_mode: name
 n_realizations: 200
 seed: 42
 sampling: lhs
 out_dir: mbal_output
-out_csv: mbal_results.csv
-validate_tags: true
-log_level: INFO
 
-unit_stoiip: MSm3
-unit_press: bara
-unit_cum: MSm3
-
-volume_model:
-  kind: connected_volume
-  field_scale:
-    kind: lognormal
-    p90: 0.88
-    p10: 1.10
-  # Correlation between tanks that share a connectivity group (below).
-  # 0 = each sand connects or not on its own coin flip. 1 = one barrier
-  # decides them together. Each tank keeps its own p_connected either way;
-  # only the joint case changes. 0.8 says "very likely the same fault".
-  # OWN THIS NUMBER - it is a geological statement, not a tuning knob.
-  connectivity_correlation: 0.8
-
-# Optional. Empty = no lift sweep. The index selects a PREDINP.CONSTRAINT row;
-# the default MAX_GASLIFT tag is field-level and does not use gas_lift_well.
-# gas_lift_well remains available only for a custom verified per-well tag.
-gas_lift_well: REPLACE_WITH_GAS_LIFT_WELL_NAME
-gas_lift_prediction_index: 1
+# Prediction controls. Empty lists disable their sweeps.
 gas_lift_values: []
-
-# Optional. Empty = no injection sweep.
-water_inj_well: REPLACE_WITH_WATER_INJ_WELL_NAME
-water_inj_prediction_index: 1
 water_inj_control: rate_with_bhp_limit
-water_inj_rate_values: [0.0, 300.0, 600.0]
-water_inj_bhp_values: [250.0, 300.0]
+water_inj_rate_values: []
+water_inj_bhp_values: []
 
+# official_stoiip is required. If P90 and P10 are omitted, the tank is fixed.
+# If both are supplied, official_stoiip is the P50. Tanks are sampled
+# independently and stoiip_total is their row-wise sum.
 tanks:
   - key: A
     name: REPLACE_WITH_TANK_A_NAME
     index: 0
-    result_index: 1          # TRES sheet 0 is consolidated; tank sheets start at 1
+    result_index: 1
+    p90_stoiip: 3.5
     official_stoiip: 4.5
-    role: base
-    connectivity:
-      kind: two_section
-      p_connected: 0.30
-      isolated_fraction: 0.50
-      group: base_sands        # same barrier as B - see connectivity_correlation
-      residual: {kind: lognormal, p90: 0.88, p10: 1.10}
+    p10_stoiip: 5.5
   - key: B
     name: REPLACE_WITH_TANK_B_NAME
     index: 1
     result_index: 2
     official_stoiip: 3.0
-    role: base
-    connectivity:
-      kind: two_section
-      p_connected: 0.35
-      isolated_fraction: 0.50
-      group: base_sands        # same barrier as A - see connectivity_correlation
-      residual: {kind: lognormal, p90: 0.70, p10: 1.25}
   - key: C
-    name: REPLACE_WITH_DEEPER_SAND_NAME
+    name: REPLACE_WITH_TANK_C_NAME
     index: 2
     result_index: 3
+    p90_stoiip: 5.0
     official_stoiip: 6.5
-    role: upside
-    in_model: false
-    connectivity:
-      kind: optional
-      p_connected: 0.25
-      isolated_fraction: 0.0
-      residual: {kind: lognormal, p90: 0.60, p10: 1.40}
+    p10_stoiip: 8.0
 
-tags:
-  tank_stoiip: 'MBAL.MB[0].TANK[{{{tank}}}].OOIP'
-  aquifer_volume: 'MBAL.MB[0].TANK[{{{tank}}}].AQUIF.VOLUME'
-  gas_lift_rate: 'MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAX_GASLIFT'
-  water_inj_rate: 'MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAXINJWATRATE'
-  water_inj_min_rate: 'MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MININJWATRATE'
-  water_inj_bhp: 'MBAL.MB[0].PREDWELL[{{{well}}}].CONSTFBHP'
-  water_inj_max_fbhp: 'MBAL.MB[0].PREDWELL[{{{well}}}].MAXFBHP'
-  water_inj_perform: 'MBAL.MB[0].PREDWELL[{{{well}}}].PERFORMTYPE'
-  pred_watinj: MBAL.MB[0].PREDINP.WATINJ
-  cmd_open: 'MBAL.OPENFILE("{path}")'
-  cmd_run_pred: MBAL.MB.RunPrediction
-  cmd_close: MBAL.SHUTDOWN
-  res_nsteps: 'MBAL.MB[0].TRES[2][{{{tank}}}].COUNT'
-  res_cumoil: 'MBAL.MB[0].TRES[2][{{{tank}}}][{k}].OILRECOVER("{u}")'
-  res_pressure: 'MBAL.MB[0].TRES[2][{{{tank}}}][{k}].TANKPRESS("{u}")'
-  # Optional water result names are deliberately not assumed. Add
-  # res_cumwat/res_cumwatinj only after Ctrl+Right-clicking
-  # the exact result columns and verifying them in a one-realization run.
+# Default OpenServer tags are built in. Add a tags: mapping only when an
+# access string differs in your installed MBAL version; copy it with
+# Ctrl+Right-click rather than guessing.

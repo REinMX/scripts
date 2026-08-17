@@ -1,37 +1,23 @@
-# Use guide — MBAL open, then run
+# Use guide — three tanks, then prediction controls
 
-Windows + licensed MBAL + OpenServer. Python can live in this repo;
-MBAL must be installed on the same machine.
+Use a Windows machine with licensed MBAL and OpenServer for predictions. A dry
+run works anywhere and never opens MBAL.
 
-For the complete work procedure (backup, private local config, printable tag
-sheet, COM smoke test, minimal licensed run, resume, QA, and troubleshooting),
-use [mbal-openserver-runbook.md](mbal-openserver-runbook.md). Never put private
-model values in the committed `example.yaml`; copy that template to
-`mbal_config.local.yaml`, which is ignored by Git.
+For backup, COM, and tag troubleshooting details, use
+[mbal-openserver-runbook.md](mbal-openserver-runbook.md).
 
-Theory for the tank volumes: [oil-in-place.md](oil-in-place.md).
+## 1. Prepare MBAL once
 
----
+1. Open the corrected `.mbi` and save a backup.
+2. Confirm the prediction already runs manually. This script changes inputs and
+   calls `MBAL.MB.RunPrediction`; it does not build the prediction.
+3. Confirm all three tank names and their `TRES[2]` result sheets. Sheet 0 is
+   commonly consolidated; tank sheets normally start at 1.
+4. Copy any version-specific input/result strings with Ctrl+Right-click. The
+   built-in tags are defaults; add only the overrides you need under `tags:`.
+5. Do not edit the model in the GUI while OpenServer is running it.
 
-## 0. Once, with MBAL open
-
-1. Open your `.mbi`.
-2. Confirm a **prediction** is already set up (dates, wells, constraints).
-   This script only calls `MBAL.MB.RunPrediction`. It does not build the
-   prediction from scratch.
-3. Write down the **exact** tank names and well names (case-sensitive).
-4. Copy OpenServer strings from MBAL:
-   - Put the mouse on the input (tank OOIP, prediction-constraint
-     `MAX_GASLIFT`/`MAXINJWATRATE`, injector `CONSTFBHP`, …).
-   - **Ctrl + Right-click** → copy the access string.
-   - Paste that string into `tags:` in the YAML. `{tank}`, `{well}`,
-     `{p}` stay as placeholders; names go in `tanks:` / `water_inj_well`
-     / `gas_lift_well`.
-5. Save the `.mbi`. Leave MBAL **closed** or let the script open the
-   file (`MBAL.OPENFILE`). Do not edit the same file in the GUI while
-   a run is going.
-
-First-time Python (once per PC):
+First-time Python setup:
 
 ```text
 python -m venv .venv
@@ -40,54 +26,53 @@ pip install -r requirements.txt
 pip install pywin32
 ```
 
-Always start with a **dry-run** (no MBAL). Only then run the licensed
-sweep.
+## 2. Create the local YAML
 
----
-
-## Case 1 — Volume only (no prediction)
-
-Use this when you change official volumes or `p_connected` and want the
-decision table. MBAL does not need to be open.
-
-1. Edit `official_stoiip` / `p_connected` in `mbal_config.local.yaml`.
-2. Clear `gas_lift_values` and `water_inj_*_values` (or ignore extra rows).
-3. Run:
-
-```text
-python mbal.py --config mbal_config.local.yaml --dry-run --n 800
+```powershell
+Copy-Item .\example.yaml .\mbal_config.local.yaml
+git check-ignore -v -- .\mbal_config.local.yaml
 ```
 
-4. Open `mbal_output/decision_volume_summary.csv`.
-5. Check: P50 of the deeper sand is 0; base P50 is well below official
-   A+B. If not, the prior is too high.
-6. Check `P(all base tanks isolated)`. If it looks like the product of
-   the individual P(connected) values, the shared barrier is not being
-   modelled — see `connectivity_correlation` in
-   [oil-in-place.md](oil-in-place.md#4-the-connected-volume-model).
+Set the model path and the exact three tank names. For each tank:
 
----
+```yaml
+- key: A
+  name: <exact MBAL tank name>
+  index: 0
+  result_index: 1
+  p90_stoiip: 3.5       # optional, but P90/P10 are a pair
+  official_stoiip: 4.5  # fixed value, or P50 when P90/P10 exist
+  p10_stoiip: 5.5
+```
 
-## Case 2 — Producer prediction (A and B in the .mbi)
+Omit both percentile fields for a fixed official volume. Do not add
+connectivity, communication groups, volume scales, residual multipliers, or
+base/upside roles; those keys are not part of this implementation.
 
-Sidetrack oil well, no lift sweep, no injector yet. Same three tanks in
-YAML. Deeper sand C stays out of MBAL (`in_model: false`).
+Validate before sampling:
 
-**In MBAL**
+```text
+python mbal.py --config mbal_config.local.yaml --validate-config
+```
 
-1. Tanks A and B exist and are linked to the oil producer.
-2. Prediction is valid and runs by hand once (green, finishes).
-3. Copy OOIP tags for A and B.
-4. Verify tank result sheets in `TRES[2]`: sheet 0 is consolidated in a
-   multi-tank case; tank sheets follow from 1. Set `result_index` if using
-   numeric result tags.
+## 3. Volume dry run
 
-**In YAML** (`mbal_config.local.yaml`)
+```text
+python mbal.py --config mbal_config.local.yaml --dry-run --n 200
+```
 
-1. `mbal_file:` → full path to the `.mbi`.
-2. `tanks:` `name:` → exact MBAL tank names for A, B, and C.
-3. Tank C: leave `in_model: false`.
-4. Clear the sweep lists:
+Check:
+
+- exactly 200 base realizations when all control lists are empty;
+- one `stoiip_<key>` column per tank;
+- `stoiip_total` equals the row-wise tank sum;
+- fixed tanks equal `official_stoiip` in every row;
+- probabilistic tanks reproduce the entered P90/P50/P10 approximately;
+- `summary_percentiles.csv` shows the official value beside each distribution.
+
+## 4. Licensed producer prediction
+
+Keep control lists empty:
 
 ```yaml
 gas_lift_values: []
@@ -95,182 +80,74 @@ water_inj_rate_values: []
 water_inj_bhp_values: []
 ```
 
-**Run**
+Run a smoke check, then one realization, then the campaign:
 
 ```text
+python mbal.py --config mbal_config.local.yaml --check-openserver
+python mbal.py --config mbal_config.local.yaml --n 1
 python mbal.py --config mbal_config.local.yaml --n 200
 ```
 
-**Look at**
+Review the results CSV for `np_*`, `pres_*`, and `rf_*` per tank and for the
+field total.
 
-- `summary_percentiles.csv` — connected STOIIP
-- `decision_volume_summary.csv` — base vs upside volume
-- results CSV — `np_*`, `pres_*`, `rf_*` per tank
+## 5. Gas-lift sweep
 
----
-
-## Case 3 — Gas lift on the producer
-
-Same as Case 2, plus a lift-rate grid.
-
-**In MBAL**
-
-1. Producer is a gas-lift well (`TYPE` includes lift).
-2. Prediction has a gas-lift limit you can edit.
-3. Ctrl+Right-click the prediction constraint → paste into
-   `tags.gas_lift_rate`. The supported hierarchy is
-   `PREDINP.CONSTRAINT[{p}].MAX_GASLIFT`.
-4. `{p}` is the prediction-constraint row index (often `1`, but never
-   assume it). Confirm it in the browser.
-
-**In YAML** — same `mbal_config.local.yaml`, same three tanks
-
-1. `gas_lift_values:` → rates in **model units** (e.g. MMscf/d), e.g.
-   `[0, 0.5, 1.0, 1.5]`.
-2. The default `MAX_GASLIFT` tag is field-level and does not use
-   `gas_lift_well`; that name is only needed for a custom verified per-well tag.
-3. Leave `water_inj_*_values` empty unless you also want that grid.
-
-**Dry-run, then licensed**
-
-```text
-python mbal.py --config mbal_config.local.yaml --dry-run --n 50 --gas-lift-values 0,0.5,1.0
-
-python mbal.py --config mbal_config.local.yaml --n 200
-```
-
-**Look at** `gas_lift_sensitivity.csv` / `.png` — field oil vs lift
-rate. Do not read `np_total` from `summary_percentiles.csv` (that file
-only repeats the tank volumes).
-
----
-
-## Case 4 — Water injector (rate and BHP)
-
-One injector linked to **both** tanks A and B. The script sets well
-rate and BHP; MBAL splits the water.
-
-**In MBAL**
-
-1. Add a water injector, type `WATINJ`.
-2. Link it to tank A and tank B.
-3. Turn water injection on in prediction setup (`WATINJ = YES`).
-4. Run the prediction once by hand with a dummy rate so you know it
-   solves.
-5. Ctrl+Right-click and copy:
-   - prediction **maximum injection-water rate**
-     (`PREDINP.CONSTRAINT[i].MAXINJWATRATE`) → `tags.water_inj_rate`
-   - prediction **minimum injection-water rate**
-     (`MININJWATRATE`) → `tags.water_inj_min_rate` for fixed-rate mode
-   - injector **max FBHP** → `tags.water_inj_max_fbhp`
-   - injector **constant FBHP** (if you use `control: bhp`) →
-     `tags.water_inj_bhp`
-6. Save.
-
-**In YAML** — same `mbal_config.local.yaml`, same three tanks
-
-1. `water_inj_well:` → exact injector name.
-2. `water_inj_control:`
-   - `rate_with_bhp_limit` — target rate, BHP is a cap (usual)
-   - `rate` — pin min = max rate
-   - `bhp` — fixed FBHP (`PERFORMTYPE=CFBHP`)
-3. Lists in **model units**:
+Use rates in the model units:
 
 ```yaml
+gas_lift_values: [0, 0.5, 1.0]
+```
+
+The default control is
+`PREDINP.CONSTRAINT[{p}].MAX_GASLIFT`; verify `{p}` in MBAL. Every volume
+realization is repeated at every lift rate. Read `gas_lift_sensitivity.csv` and
+`.png`, not pooled production percentiles.
+
+## 6. Water-injection sweep
+
+Set the injector name if the chosen tags use `{well}`, then choose one control:
+
+- `rate`: minimum and maximum rate are set to the same value;
+- `bhp`: fixed FBHP with `PERFORMTYPE=CFBHP`;
+- `rate_with_bhp_limit`: target rate plus maximum FBHP.
+
+Example:
+
+```yaml
+water_inj_well: <exact injector name>
+water_inj_control: rate_with_bhp_limit
 water_inj_rate_values: [0, 300, 600]
 water_inj_bhp_values: [250, 300]
 ```
 
-Row count = `n_realizations` × rates × BHPs. Start small (`--n 20`)
-until tags validate.
+Row count is `n_realizations × rates × BHPs`. Start with a small dry run. Read
+`water_inj_sensitivity.csv` and `.png` for field oil by control setting.
 
-**Dry-run, then licensed**
+## 7. Resume and summarize
 
-```text
-python mbal.py --config mbal_config.local.yaml --dry-run --n 20
-
-python mbal.py --config mbal_config.local.yaml --n 200
-```
-
-If tag validation fails, the printed string is wrong for your IPM
-version. Copy again from the browser; do not guess.
-
-**Look at**
-
-- `water_inj_sensitivity.csv` / `.png` — field oil vs rate (one line
-  per BHP)
-- `decision_volume_summary.csv` — volumes (same every rate)
-- results CSV — `wi_*` is cumulative water injected if the tag exists
-
-Optional TRES cumulative-water field names are deliberately not assumed. Add
-`res_cumwat`/`res_cumwatinj` only after copying and probing those exact result
-columns; otherwise `wp_*`/`wi_*` remain `NaN`.
-
----
-
-## Case 5 — Deeper sand (tank C) in MBAL
-
-Do this only after Case 1 still looks honest (P50(C) = 0).
-
-**In MBAL**
-
-1. Add tank C (deeper sand).
-2. Link the oil producer to C (and the injector if you want support
-   into that sand).
-3. Run prediction once by hand.
-4. Copy the OOIP tag for C.
-
-**In YAML**
-
-```yaml
-  - key: C
-    name: <exact MBAL tank name>
-    index: 2
-    official_stoiip: 6.5
-    role: upside
-    in_model: true
-```
-
-**Run** the same command as Case 2 or 4. C now gets an OOIP each
-realization (0 is written as `min_tank_stoiip` so MBAL does not see a
-true zero). `np_C` appears in the results.
-
----
-
-## Case 6 — Official volumes changed
-
-1. Change only `official_stoiip` on A / B / C.
-2. Repeat Case 1 (dry-run). Check the decision table.
-3. Repeat the licensed case you care about (2, 3, or 4).
-4. Use a **new** `out_dir` (or delete the old CSV). Resume will refuse
-   if the sampled volumes no longer match.
-
----
-
-## If a licensed run stops
+Restart with the same YAML, seed, and output directory:
 
 ```text
 python mbal.py --config mbal_config.local.yaml
 ```
 
-Same `out_dir` / `out_csv` / seed / YAML. Failed rows are retried;
-`status == ok` is skipped.
+Rows with `status == ok` are skipped; failed rows are retried. Resume refuses a
+CSV whose stored inputs differ from the regenerated sample table.
 
-Rebuild plots from a finished CSV:
+Rebuild summaries without opening MBAL:
 
 ```text
 python mbal.py --config mbal_config.local.yaml --summarize-only
 ```
 
----
+## Main outputs
 
-## What to open after a run
-
-| File | When |
+| File | Purpose |
 |---|---|
-| `decision_volume_summary.csv` | Any connected-volume run — base vs upside STOIIP |
-| `summary_percentiles.csv` | Tank volume P90/P50/P10 |
-| `gas_lift_sensitivity.csv` | Case 3 |
-| `water_inj_sensitivity.csv` | Case 4 |
-| `*_results.csv` | Row-level Np, pressure, RF |
-| `mbal_run.log` | Errors and ETA |
+| `samples_dry_run.csv` | Sampled volumes and control grid |
+| `summary_percentiles.csv` | Official, P90/P50/P10, mean, std for tank/field STOIIP |
+| `mbal_results.csv` | Resume-safe row-level prediction results |
+| `gas_lift_sensitivity.csv` | Field Np by lift rate |
+| `water_inj_sensitivity.csv` | Field Np by injector rate/BHP |
+| `mbal_run.log` | Errors, retries, and ETA |
