@@ -131,13 +131,20 @@ python mbal.py --config mbal_config.local.yaml --summarize-only
 | `samples_dry_run.csv` | Sampled inputs from `--dry-run` |
 | `mbal_results.csv` | Resume-safe row-level prediction results |
 | `summary_percentiles.csv` | Official, P90, P50, P10, mean, and standard deviation |
-| `gas_lift_sensitivity.*` | Field oil by gas-lift rate |
-| `water_inj_sensitivity.*` | Field oil by injector rate/BHP |
+| `gas_lift_sensitivity.*` | Absolute and paired incremental field oil by gas-lift rate |
+| `water_inj_sensitivity.*` | Absolute and paired incremental field oil by injector rate/BHP |
 | `run_metadata.csv` | Seed, sampling method, and success counts |
 
 On restart, rows with `status == ok` are skipped and failed rows are retried.
 Stored input columns are checked against the deterministic sample table, so a
 changed seed or prior cannot be resumed silently.
+
+Operational sensitivity CSVs compare each setting against the lowest value of
+the swept control while holding any other controls fixed. They report
+`delta_P90/P50/P10`, `probability_delta_positive`, and `n_paired`, plus
+per-setting `n_expected`, `n_ok`, `n_failed`, `n_missing`, and
+`success_fraction`. Incomplete settings are logged and must be investigated
+before comparing percentiles.
 
 ## Verify
 

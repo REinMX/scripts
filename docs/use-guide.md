@@ -102,7 +102,9 @@ gas_lift_values: [0, 0.5, 1.0]
 The default control is
 `PREDINP.CONSTRAINT[{p}].MAX_GASLIFT`; verify `{p}` in MBAL. Every volume
 realization is repeated at every lift rate. Read `gas_lift_sensitivity.csv` and
-`.png`, not pooled production percentiles.
+`.png`, not pooled production percentiles. The CSV also reports paired
+incremental oil relative to the lowest lift rate for the same volume
+realization and any other fixed control settings.
 
 ## 6. Water-injection sweep
 
@@ -122,7 +124,21 @@ water_inj_bhp_values: [250, 300]
 ```
 
 Row count is `n_realizations × rates × BHPs`. Start with a small dry run. Read
-`water_inj_sensitivity.csv` and `.png` for field oil by control setting.
+`water_inj_sensitivity.csv` and `.png` for field oil by control setting. Paired
+increments use the lowest swept rate, or the lowest BHP when BHP is the only
+water control, as the reference while holding the other controls fixed.
+
+Both sensitivity CSVs include:
+
+- absolute Np P90/P50/P10 for each complete control setting;
+- `delta_P90`, `delta_P50`, and `delta_P10` from paired realizations;
+- `probability_delta_positive` and `n_paired`;
+- `n_expected`, `n_rows`, `n_ok`, `n_failed`, `n_missing`, and
+  `success_fraction`.
+
+Do not compare settings with unexplained failures or missing realizations.
+When three control axes are active together, the complete Cartesian results
+remain in the CSV, but the two-dimensional sensitivity plot is skipped.
 
 ## 7. Resume and summarize
 
@@ -148,6 +164,6 @@ python mbal.py --config mbal_config.local.yaml --summarize-only
 | `samples_dry_run.csv` | Sampled volumes and control grid |
 | `summary_percentiles.csv` | Official, P90/P50/P10, mean, std for tank/field STOIIP |
 | `mbal_results.csv` | Resume-safe row-level prediction results |
-| `gas_lift_sensitivity.csv` | Field Np by lift rate |
-| `water_inj_sensitivity.csv` | Field Np by injector rate/BHP |
+| `gas_lift_sensitivity.csv` | Absolute and paired incremental field Np by lift rate |
+| `water_inj_sensitivity.csv` | Absolute and paired incremental field Np by injector rate/BHP |
 | `mbal_run.log` | Errors, retries, and ETA |

@@ -29,8 +29,9 @@ import sys
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from itertools import product
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 import numpy as np
 import pandas as pd
@@ -1026,7 +1027,8 @@ def build_sample_table(cfg: Config) -> pd.DataFrame:
         else:
             unit = None
         column = f"stoiip_{tank.key}"
-        data[column] = _sample_tank_stoiip(tank, unit, cfg.n_realizations)
+        sampled_stoiip = _sample_tank_stoiip(tank, unit, cfg.n_realizations)
+        data[column] = np.maximum(sampled_stoiip, cfg.min_tank_stoiip)
         stoiip_columns.append(column)
 
     data["stoiip_total"] = np.sum(
@@ -1729,27 +1731,35 @@ def _plot_tank_metric(
 
 def _summarize_gas_lift(df: pd.DataFrame, cfg: Config) -> None:
     """Write and plot field-oil sensitivity versus deterministic gas-lift rate."""
+    context_columns = tuple(
+        name
+        for name in ("water_inj_rate", "water_inj_bhp")
+        if name in df.columns
+    )
     _summarize_operational_sweep(
         df,
         cfg,
-        group_columns=("gas_lift_rate",),
+        group_columns=("gas_lift_rate", *context_columns),
         filename="gas_lift_sensitivity",
         x_column="gas_lift_rate",
         x_label="Gas lift rate [current MBAL model units]",
         title="Gas-lift sensitivity",
+        series_column=context_columns[0] if len(context_columns) == 1 else None,
     )
 
 
 def _summarize_water_inj(df: pd.DataFrame, cfg: Config) -> None:
     """Write and plot field-oil sensitivity versus injector rate and/or BHP."""
-    group_columns = tuple(
+    water_columns = tuple(
         name
         for name in ("water_inj_rate", "water_inj_bhp")
         if name in df.columns
     )
-    if not group_columns:
+    if not water_columns:
         return
-    x_column = "water_inj_rate" if "water_inj_rate" in group_columns else "water_inj_bhp"
+    context_columns = ("gas_lift_rate",) if "gas_lift_rate" in df.columns else ()
+    group_columns = (*water_columns, *context_columns)
+    x_column = "water_inj_rate" if "water_inj_rate" in water_columns else "water_inj_bhp"
     if x_column == "water_inj_rate":
         x_label = "Water injection rate [current MBAL model units]"
     else:
@@ -1762,7 +1772,11 @@ def _summarize_water_inj(df: pd.DataFrame, cfg: Config) -> None:
         x_column=x_column,
         x_label=x_label,
         title="Water-injection sensitivity",
-        series_column="water_inj_bhp" if len(group_columns) == 2 else None,
+        series_column=(
+            next(name for name in group_columns if name != x_column)
+            if len(group_columns) == 2
+            else None
+        ),
     )
 
 
@@ -1777,30 +1791,136 @@ def _summarize_operational_sweep(
     title: str,
     series_column: str | None = None,
 ) -> None:
-    if x_column not in df.columns or "np_total" not in df.columns:
+    if df.empty or x_column not in df.columns or "np_total" not in df.columns:
         return
     missing = [column for column in group_columns if column not in df.columns]
     if missing:
         return
-    successful = df[df["status"] == "ok"] if "status" in df.columns else df
-    if successful.empty:
-        return
 
-    rows = []
-    for keys, group in successful.groupby(list(group_columns), sort=True):
+    observed_groups: dict[tuple[float, ...], pd.DataFrame] = {}
+    for keys, group in df.groupby(list(group_columns), sort=True, dropna=False):
         if not isinstance(keys, tuple):
             keys = (keys,)
+        observed_groups[tuple(float(cast(Any, value)) for value in keys)] = group
+
+    configured_values: dict[str, tuple[float, ...]] = {
+        "gas_lift_rate": cfg.gas_lift_values,
+        "water_inj_rate": cfg.water_inj_rate_values,
+        "water_inj_bhp": cfg.water_inj_bhp_values,
+    }
+    control_axes: list[tuple[float, ...]] = []
+    for column in group_columns:
+        values = configured_values.get(column, ())
+        if not values:
+            values = tuple(float(value) for value in sorted(df[column].dropna().unique()))
+        control_axes.append(tuple(dict.fromkeys(values)))
+    expected_keys = list(product(*control_axes))
+    expected_key_set = set(expected_keys)
+    ordered_keys = expected_keys + [
+        key for key in observed_groups if key not in expected_key_set
+    ]
+    empty_group = df.iloc[0:0]
+    grouped = [
+        (
+            keys,
+            cast(pd.DataFrame, observed_groups.get(keys, empty_group)),
+        )
+        for keys in ordered_keys
+    ]
+
+    rows = []
+    x_position = group_columns.index(x_column)
+    context_positions = tuple(
+        index for index, name in enumerate(group_columns) if name != x_column
+    )
+    for keys, group in grouped:
+        successful = (
+            group.loc[group["status"] == "ok"] if "status" in group.columns else group
+        )
         stats = percentiles(
-            group["np_total"].to_numpy(dtype=float), extra=cfg.extra_percentiles
+            successful["np_total"].to_numpy(dtype=float), extra=cfg.extra_percentiles
         )
         record = {name: value for name, value in zip(group_columns, keys)}
         record.update(stats)
-        record["n"] = len(group)
+        n_expected = cfg.n_realizations
+        n_rows = len(group)
+        n_ok = len(successful)
+        record.update(
+            {
+                "n": n_ok,
+                "n_expected": n_expected,
+                "n_rows": n_rows,
+                "n_ok": n_ok,
+                "n_failed": n_rows - n_ok,
+                "n_missing": max(n_expected - n_rows, 0),
+                "success_fraction": n_ok / n_expected,
+            }
+        )
+
+        reference_key, reference_group = min(
+            (
+                (candidate_keys, candidate_group)
+                for candidate_keys, candidate_group in grouped
+                if all(
+                    candidate_keys[position] == keys[position]
+                    for position in context_positions
+                )
+            ),
+            key=lambda item: item[0][x_position],
+        )
+        reference_successful = (
+            reference_group.loc[reference_group["status"] == "ok"]
+            if "status" in reference_group.columns
+            else reference_group
+        )
+        deltas = np.array([], dtype=float)
+        if "base_realization" in group.columns:
+            current_pairs = successful.loc[
+                :, ["base_realization", "np_total"]
+            ].drop_duplicates(
+                subset="base_realization", keep="last"
+            )
+            reference_pairs = reference_successful.loc[
+                :, ["base_realization", "np_total"]
+            ].drop_duplicates(subset="base_realization", keep="last")
+            paired = current_pairs.merge(
+                reference_pairs,
+                on="base_realization",
+                suffixes=("_current", "_reference"),
+                validate="one_to_one",
+            )
+            deltas = (
+                paired["np_total_current"] - paired["np_total_reference"]
+            ).to_numpy(dtype=float)
+            deltas = deltas[np.isfinite(deltas)]
+        delta_stats = percentiles(deltas, extra=cfg.extra_percentiles)
+        record[f"reference_{x_column}"] = reference_key[x_position]
+        record.update({f"delta_{name}": value for name, value in delta_stats.items()})
+        record["n_paired"] = len(deltas)
+        record["probability_delta_positive"] = (
+            float(np.mean(deltas > 0.0)) if deltas.size else float("nan")
+        )
+
+        if n_rows != n_expected or n_ok != n_expected:
+            settings = ", ".join(
+                f"{name}={value}" for name, value in zip(group_columns, keys)
+            )
+            LOG.warning(
+                "%s coverage incomplete: %d rows, %d ok, %d expected",
+                settings,
+                n_rows,
+                n_ok,
+                n_expected,
+            )
         rows.append(record)
     sensitivity = pd.DataFrame(rows)
     path = os.path.join(cfg.out_dir, f"{filename}.csv")
     sensitivity.to_csv(path, index=False)
     LOG.info("wrote %s", path)
+
+    if len(group_columns) > 2:
+        LOG.info("skipping %s plot because it has multiple context controls", filename)
+        return
 
     try:
         import matplotlib

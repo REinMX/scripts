@@ -30,6 +30,42 @@ def test_tank_without_percentiles_uses_fixed_official_volume() -> None:
     np.testing.assert_allclose(samples["stoiip_total"], 4.5)
 
 
+def test_sample_table_records_the_minimum_volume_written_to_mbal() -> None:
+    cfg = mbal.Config(
+        tanks=(
+            mbal.TankConfig(
+                key="A",
+                name="Tank A",
+                index=0,
+                official_stoiip=1.0,
+                p90_stoiip=0.1,
+                p10_stoiip=2.0,
+            ),
+        ),
+        n_realizations=1_000,
+        seed=7,
+        min_tank_stoiip=0.8,
+    )
+
+    samples = mbal.build_sample_table(cfg)
+
+    assert samples["stoiip_A"].min() == pytest.approx(0.8)
+    np.testing.assert_allclose(samples["stoiip_total"], samples["stoiip_A"])
+
+    class RecordingServer:
+        def __init__(self) -> None:
+            self.values: list[tuple[str, float]] = []
+
+        def set(self, tag: str, value: float) -> None:
+            self.values.append((tag, value))
+
+    first_clipped = samples.loc[samples["stoiip_A"] == 0.8].iloc[0]
+    server = RecordingServer()
+    mbal.apply_realization(server, first_clipped, cfg)
+
+    assert server.values == [("MBAL.MB[0].TANK[{Tank A}].OOIP", 0.8)]
+
+
 def test_optional_percentiles_anchor_p90_official_p50_and_p10() -> None:
     cfg = mbal.Config(
         tanks=(

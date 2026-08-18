@@ -171,9 +171,132 @@ def test_water_inj_summary_does_not_pool_across_settings(tmp_path) -> None:
     ]
 
     table = pd.read_csv(tmp_path / "water_inj_sensitivity.csv")
-    assert table["water_inj_rate"].tolist() == [0.0, 300.0]
-    np.testing.assert_allclose(table["P50"], [1.8, 3.1])
+    assert len(table) == 6
+    present = table.loc[
+        (table["water_inj_bhp"] == 250.0)
+        & table["water_inj_rate"].isin([0.0, 300.0])
+    ]
+    np.testing.assert_allclose(present["P50"], [1.8, 3.1])
+    missing = table.loc[table["n_rows"] == 0]
+    assert len(missing) == 4
+    assert (missing["n_missing"] == cfg.n_realizations).all()
     assert (tmp_path / "water_inj_sensitivity.png").exists()
+
+
+def test_water_inj_summary_reports_failures_and_missing_coverage(tmp_path) -> None:
+    cfg = inj_cfg(
+        out_dir=str(tmp_path),
+        n_realizations=3,
+        water_inj_rate_values=(0.0, 300.0),
+        water_inj_bhp_values=(250.0,),
+    )
+    results = pd.DataFrame(
+        {
+            "realization": [0, 1, 2, 3, 4],
+            "base_realization": [0, 1, 2, 0, 1],
+            "water_inj_rate": [0.0, 0.0, 0.0, 300.0, 300.0],
+            "water_inj_bhp": [250.0] * 5,
+            "np_total": [1.0, np.nan, 1.4, 1.8, 2.0],
+            "status": ["ok", "failed: convergence", "ok", "ok", "ok"],
+        }
+    )
+
+    mbal._summarize_water_inj(results, cfg)
+
+    summary = pd.read_csv(tmp_path / "water_inj_sensitivity.csv")
+    baseline = summary.loc[summary["water_inj_rate"] == 0.0].iloc[0]
+    higher_rate = summary.loc[summary["water_inj_rate"] == 300.0].iloc[0]
+    assert baseline["n_expected"] == 3
+    assert baseline["n_rows"] == 3
+    assert baseline["n_ok"] == 2
+    assert baseline["n_failed"] == 1
+    assert baseline["n_missing"] == 0
+    assert baseline["success_fraction"] == pytest.approx(2.0 / 3.0)
+    assert higher_rate["n_expected"] == 3
+    assert higher_rate["n_rows"] == 2
+    assert higher_rate["n_ok"] == 2
+    assert higher_rate["n_failed"] == 0
+    assert higher_rate["n_missing"] == 1
+    assert higher_rate["success_fraction"] == pytest.approx(2.0 / 3.0)
+
+
+def test_water_inj_summary_reports_a_completely_missing_setting(tmp_path) -> None:
+    cfg = inj_cfg(
+        out_dir=str(tmp_path),
+        n_realizations=3,
+        water_inj_rate_values=(0.0, 300.0),
+        water_inj_bhp_values=(250.0,),
+    )
+    results = pd.DataFrame(
+        {
+            "realization": [0, 1, 2],
+            "base_realization": [0, 1, 2],
+            "water_inj_rate": [0.0, 0.0, 0.0],
+            "water_inj_bhp": [250.0, 250.0, 250.0],
+            "np_total": [1.0, 1.2, 1.4],
+            "status": ["ok", "ok", "ok"],
+        }
+    )
+
+    mbal._summarize_water_inj(results, cfg)
+
+    summary = pd.read_csv(tmp_path / "water_inj_sensitivity.csv")
+    missing_setting = summary.loc[summary["water_inj_rate"] == 300.0].iloc[0]
+    assert len(summary) == 2
+    assert missing_setting["n_rows"] == 0
+    assert missing_setting["n_ok"] == 0
+    assert missing_setting["n_missing"] == 3
+    assert missing_setting["success_fraction"] == pytest.approx(0.0)
+    assert missing_setting["n_paired"] == 0
+
+
+def test_water_inj_summary_does_not_pool_gas_lift_settings(tmp_path) -> None:
+    cfg = inj_cfg(
+        out_dir=str(tmp_path),
+        n_realizations=2,
+        gas_lift_values=(0.0, 1.0),
+        water_inj_rate_values=(0.0, 100.0),
+        water_inj_bhp_values=(),
+    )
+    results = pd.DataFrame(
+        {
+            "realization": range(8),
+            "base_realization": [0, 1, 0, 1, 0, 1, 0, 1],
+            "gas_lift_rate": [0.0] * 4 + [1.0] * 4,
+            "water_inj_rate": [0.0, 0.0, 100.0, 100.0] * 2,
+            "np_total": [10.0, 20.0, 12.0, 22.0, 15.0, 25.0, 20.0, 30.0],
+            "status": ["ok"] * 8,
+        }
+    )
+
+    mbal._summarize_water_inj(results, cfg)
+
+    summary = pd.read_csv(tmp_path / "water_inj_sensitivity.csv")
+    assert len(summary) == 4
+    higher_rate_with_lift = summary.loc[
+        (summary["water_inj_rate"] == 100.0)
+        & (summary["gas_lift_rate"] == 1.0)
+    ].iloc[0]
+    assert higher_rate_with_lift["n_rows"] == 2
+    assert higher_rate_with_lift["delta_P50"] == pytest.approx(5.0)
+
+
+def test_water_inj_summary_handles_an_empty_results_table(tmp_path) -> None:
+    cfg = inj_cfg(out_dir=str(tmp_path))
+    results = pd.DataFrame(
+        columns=[
+            "realization",
+            "base_realization",
+            "water_inj_rate",
+            "water_inj_bhp",
+            "np_total",
+            "status",
+        ]
+    )
+
+    mbal._summarize_water_inj(results, cfg)
+
+    assert not (tmp_path / "water_inj_sensitivity.csv").exists()
 
 
 def test_yaml_water_inj_config(tmp_path) -> None:

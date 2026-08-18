@@ -393,7 +393,9 @@ pareada y no confunde diferencias geológicas con diferencias operativas.
 **No agrupes resultados de producción de todas las tasas en un único
 percentil.** `summary_percentiles.csv` resume la geología una vez por
 realización base. Para petróleo por tasa, el resultado canónico es
-`gas_lift_sensitivity.csv` (y su PNG), con P90/P50/P10 por tasa.
+`gas_lift_sensitivity.csv` (y su PNG), con P90/P50/P10 absolutos y del delta
+pareado respecto a la tasa mínima. Si también hay inyección, cada combinación
+permanece separada; no se agrupan controles diferentes.
 
 ## 10. Resume, archivos y reinicio seguro
 
@@ -423,7 +425,8 @@ Archivos principales:
 |---|---|
 | `mbal_results.csv` o `out_csv` local | inputs, resultados, status y runtime por fila |
 | `summary_percentiles.csv` | oficial y P90/P50/P10 de tanque/campo; no pool operativo |
-| `gas_lift_sensitivity.csv` | Np de campo P90/P50/P10 por tasa de lift |
+| `gas_lift_sensitivity.csv` | Np absoluto e incremental pareado por tasa de lift |
+| `water_inj_sensitivity.csv` | Np absoluto e incremental pareado por tasa/BHP |
 | `run_metadata.csv` | seed, muestreo y conteos |
 | `mbal_run.log` | errores, progreso y ETA |
 | `*.png` | histogramas, excedencia y sensibilidades |
@@ -458,6 +461,11 @@ python -c "import os,pandas as pd; d=pd.read_csv(os.environ['MBAL_RESULTS']); pr
 - Cada `base_realization` debe contener exactamente el grid operativo completo.
 - El número de filas `ok` debe ser el aceptado por el estudio; investiga toda
   fila `failed:` y no la ocultes al resumir.
+- Las tablas de sensibilidad muestran `n_expected`, `n_ok`, `n_failed`,
+  `n_missing` y `success_fraction` por combinación. No compares percentiles si
+  la cobertura es incompleta o desigual.
+- `delta_P90/P50/P10` y `probability_delta_positive` usan solamente pares con el
+  mismo `base_realization`; `n_paired` debe ser el esperado.
 
 ### Orden de percentiles
 
@@ -564,8 +572,8 @@ En el dry run:
 - [ ] Fallos investigados; no hay filas fallidas aceptadas silenciosamente.
 - [ ] P90 ≤ P50 ≤ P10.
 - [ ] Unidades, fecha final, Np, presión, Wp y RF son consistentes.
-- [ ] `gas_lift_sensitivity.csv` se usa por tasa; no hay percentiles de
-      producción mezclados entre tasas.
+- [ ] Las tablas de sensibilidad tienen cobertura completa, `n_paired`
+      esperado y no mezclan combinaciones de controles.
 - [ ] Resume fue hecho solamente con inputs idénticos.
 - [ ] `git diff`, `git diff --cached` y búsqueda de tokens no muestran datos
       privados.

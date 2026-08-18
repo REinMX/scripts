@@ -60,3 +60,23 @@ P50(A + B) != P50(A) + P50(B)
 
 For skewed distributions the mean need not equal P50. The official value should
 be compared with P50, not with the mean.
+
+## Paired operational comparisons
+
+Every operational setting reuses the same `base_realization`. Sensitivity
+summaries therefore calculate incremental field oil row by row before taking
+percentiles:
+
+```text
+delta_Np[r, setting] = Np[r, setting] - Np[r, reference]
+```
+
+The reference is the lowest value of the swept control while all other controls
+are held fixed. `delta_P90/P50/P10` summarize these paired differences;
+`probability_delta_positive` is the fraction of valid pairs with positive
+incremental oil.
+
+Each control setting also reports expected, present, successful, failed, and
+missing row counts. Absolute or incremental percentiles can be biased when
+settings do not contain the same realization population, so incomplete coverage
+must be resolved rather than silently ignored.

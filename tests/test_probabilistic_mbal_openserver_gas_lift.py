@@ -141,6 +141,65 @@ def test_gas_lift_summary_reports_field_oil_percentiles(tmp_path) -> None:
     assert (tmp_path / "gas_lift_sensitivity.png").exists()
 
 
+def test_gas_lift_summary_reports_paired_incremental_oil(tmp_path) -> None:
+    cfg = name_cfg(
+        out_dir=str(tmp_path),
+        n_realizations=3,
+        gas_lift_values=(0.0, 1.0),
+    )
+    results = pd.DataFrame(
+        {
+            "realization": [0, 1, 2, 3, 4, 5],
+            "base_realization": [0, 1, 2, 0, 1, 2],
+            "gas_lift_rate": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            "np_total": [10.0, 20.0, 30.0, 15.0, 18.0, 45.0],
+            "status": ["ok"] * 6,
+        }
+    )
+
+    core._summarize_gas_lift(results, cfg)
+
+    summary = pd.read_csv(tmp_path / "gas_lift_sensitivity.csv")
+    baseline = summary.loc[summary["gas_lift_rate"] == 0.0].iloc[0]
+    higher_lift = summary.loc[summary["gas_lift_rate"] == 1.0].iloc[0]
+    assert baseline["reference_gas_lift_rate"] == pytest.approx(0.0)
+    assert baseline["delta_P50"] == pytest.approx(0.0)
+    assert higher_lift["reference_gas_lift_rate"] == pytest.approx(0.0)
+    assert higher_lift["n_paired"] == 3
+    assert higher_lift["delta_P50"] == pytest.approx(5.0)
+    assert higher_lift["probability_delta_positive"] == pytest.approx(2.0 / 3.0)
+
+
+def test_gas_lift_summary_does_not_pool_water_injection_settings(tmp_path) -> None:
+    cfg = name_cfg(
+        out_dir=str(tmp_path),
+        n_realizations=2,
+        gas_lift_values=(0.0, 1.0),
+        water_inj_rate_values=(0.0, 100.0),
+    )
+    results = pd.DataFrame(
+        {
+            "realization": range(8),
+            "base_realization": [0, 1, 0, 1, 0, 1, 0, 1],
+            "gas_lift_rate": [0.0, 0.0, 1.0, 1.0] * 2,
+            "water_inj_rate": [0.0] * 4 + [100.0] * 4,
+            "np_total": [10.0, 20.0, 15.0, 25.0, 12.0, 22.0, 20.0, 30.0],
+            "status": ["ok"] * 8,
+        }
+    )
+
+    core._summarize_gas_lift(results, cfg)
+
+    summary = pd.read_csv(tmp_path / "gas_lift_sensitivity.csv")
+    assert len(summary) == 4
+    higher_lift_with_injection = summary.loc[
+        (summary["gas_lift_rate"] == 1.0)
+        & (summary["water_inj_rate"] == 100.0)
+    ].iloc[0]
+    assert higher_lift_with_injection["n_rows"] == 2
+    assert higher_lift_with_injection["delta_P50"] == pytest.approx(8.0)
+
+
 def test_main_summary_does_not_pool_results_across_gas_lift_rates(tmp_path) -> None:
     cfg = name_cfg(out_dir=str(tmp_path), gas_lift_values=(0.0, 1.0))
     results = pd.DataFrame(
