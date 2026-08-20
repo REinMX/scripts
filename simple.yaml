@@ -4,8 +4,15 @@
 #   python mbal_simple.py simple.local.yaml --show      # tags only, no MBAL
 #   python mbal_simple.py simple.local.yaml --check     # model inputs vs here
 #   python mbal_simple.py simple.local.yaml --match     # official run vs here
+#   python mbal_ensemble.py simple.local.yaml --dry-run # sample volumes only
+#   python mbal_ensemble.py simple.local.yaml --run     # run every realization
 
 mbal_file: C:\Work\Models\model.mbi
+
+# Ensemble controls. CLI --n/--seed/--sampling can override these.
+n_realizations: 200
+seed: 42
+sampling: lhs
 
 # What MBAL should answer in. Leave a line out and MBAL uses the model's
 # current unit set, which is the usual reason Python and the GUI disagree.
@@ -15,13 +22,18 @@ units: {}
 #   cum_oil: MMstb
 #   pressure: psia
 
-# Per tank. stoiip is required; the other two are written only if given.
+# Per tank. stoiip is the official ARITHMETIC MEAN. Optional O&G P90/P10
+# (P90 low, P10 high) must be supplied together. With neither, the tank is
+# fixed at stoiip in every realization. The other two physical inputs stay
+# fixed while volumes are sampled.
 #   stoiip               -> TANK[{name}].OOIP
 #   aquifer_volume       -> TANK[{name}].AQUIF.VOLUME
 #   rock_compressibility -> TANK[{name}].ROCKCOMPRESS
 tanks:
   - name: REPLACE_WITH_TOP_TANK
     stoiip: 4.5
+    p90_stoiip: 3.5
+    p10_stoiip: 5.5
   - name: REPLACE_WITH_BOTTOM_TANK
     stoiip: 3.0
 

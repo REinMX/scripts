@@ -139,6 +139,91 @@ def test_missing_stoiip_is_rejected(tmp_path: Path) -> None:
         ms.load_config(path)
 
 
+def test_config_loads_ensemble_sampling_and_mean_volume_quantiles(
+    tmp_path: Path,
+) -> None:
+    path = write_config(
+        tmp_path,
+        n_realizations=25,
+        seed=7,
+        sampling="mc",
+        tanks=[
+            {
+                "name": "OS-top",
+                "stoiip": 10.0,
+                "p90_stoiip": 7.0,
+                "p10_stoiip": 14.0,
+            }
+        ],
+    )
+
+    cfg = ms.load_config(path)
+
+    assert cfg.n_realizations == 25
+    assert cfg.seed == 7
+    assert cfg.sampling == "mc"
+    assert cfg.tanks[0].inputs["stoiip"] == 10.0
+    assert cfg.tanks[0].p90_stoiip == 7.0
+    assert cfg.tanks[0].p10_stoiip == 14.0
+
+
+@pytest.mark.parametrize(
+    "tank",
+    [
+        {"name": "OS-top", "stoiip": 10.0, "p90_stoiip": 7.0},
+        {"name": "OS-top", "stoiip": 10.0, "p10_stoiip": 14.0},
+    ],
+)
+def test_volume_quantiles_must_be_given_together(tmp_path: Path, tank: dict) -> None:
+    path = write_config(tmp_path, tanks=[tank])
+
+    with pytest.raises(ValueError, match="must be given together"):
+        ms.load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("p90", "mean", "p10"),
+    [
+        (0.0, 10.0, 14.0),
+        (10.0, 10.0, 14.0),
+        (7.0, 10.0, 10.0),
+    ],
+)
+def test_volume_quantiles_must_straddle_the_positive_mean(
+    tmp_path: Path, p90: float, mean: float, p10: float
+) -> None:
+    path = write_config(
+        tmp_path,
+        tanks=[
+            {
+                "name": "OS-top",
+                "stoiip": mean,
+                "p90_stoiip": p90,
+                "p10_stoiip": p10,
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="require 0 < p90_stoiip"):
+        ms.load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"n_realizations": 0}, "n_realizations must be greater than zero"),
+        ({"sampling": "random"}, "sampling must be lhs or mc"),
+    ],
+)
+def test_invalid_ensemble_controls_are_rejected(
+    tmp_path: Path, overrides: dict, message: str
+) -> None:
+    path = write_config(tmp_path, **overrides)
+
+    with pytest.raises(ValueError, match=message):
+        ms.load_config(path)
+
+
 def test_duplicate_tank_names_are_rejected(tmp_path: Path) -> None:
     path = write_config(
         tmp_path,

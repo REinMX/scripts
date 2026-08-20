@@ -37,4 +37,8 @@ outputs/
 **/mbal_results.csv
 **/mbal_*_results.csv
 **/simple_results.csv
+**/ensemble_samples.csv
+**/ensemble_results.csv
+**/ensemble_profiles.csv
+**/ensemble_summary.csv
 **/*.png

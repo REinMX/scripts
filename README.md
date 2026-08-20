@@ -9,6 +9,7 @@ through OpenServer.
 | `mbal_core.py` | Sampling, OpenServer, resume, and summaries |
 | `example.yaml` | Small public template; copy it to a local config |
 | `mbal_simple.py` | One deterministic run from a small YAML; no sampling |
+| `mbal_ensemble.py` | Sample volumes and rerun the verified simple coupling N times |
 | `simple.yaml` | Template for the simple runner |
 | `docs/simple-runner.md` | Matching the official MBAL run |
 | `docs/use-guide.md` | Volumes, controls, running, resume |
@@ -29,9 +30,29 @@ python mbal_simple.py simple.local.yaml --match    # official run vs YAML run
 ```
 
 See [docs/simple-runner.md](docs/simple-runner.md). The probabilistic runner
-below is unchanged.
+below is unchanged, but its old per-tank `TRES[2]` result assumptions do not
+match the model validated by `mbal_simple.py`. For this model, use the ensemble
+layer on the verified simple runner:
 
-## Volumes
+```bash
+python mbal_ensemble.py simple.local.yaml --dry-run --n 200
+python mbal_ensemble.py simple.local.yaml --run --n 200
+```
+
+In `simple.local.yaml`, `stoiip` is the arithmetic mean. Add O&G
+`p90_stoiip` (low) and `p10_stoiip` (high) together for an uncertain tank;
+omit both to hold a tank fixed. The sampler uses independent tank dimensions,
+fixed seed/LHS by default, and writes the field volume as the row-wise tank sum.
+Successful rows resume safely; changed regenerated inputs are rejected. The
+fitted prior is written to `ensemble_summary.csv`, and a run warns when the
+three entered statistics are matched by more than one distribution.
+
+## Legacy `mbal.py` volume contract
+
+The sections below document the older generic probabilistic runner. It treats
+`official_stoiip` as P50 and expects a different per-tank result hierarchy. It
+remains useful for models where those tags have been verified, but it is not the
+next step for the field-level result stream matched by `mbal_simple.py`.
 
 Each tank requires `official_stoiip`, which is the **P50**.
 

@@ -43,7 +43,7 @@ TANK_INPUTS = {
     "aquifer_volume": "AQUIF.VOLUME",
     "rock_compressibility": "ROCKCOMPRESS",
 }
-TANK_KEYS = {"name", "index", *TANK_INPUTS}
+TANK_KEYS = {"name", "index", "p90_stoiip", "p10_stoiip", *TANK_INPUTS}
 CONTROL_KEYS = {"name", "tag", "value"}
 RESULTS_KEYS = {"stream", "read", "profile"}
 CONFIG_KEYS = {
@@ -56,6 +56,9 @@ CONFIG_KEYS = {
     "out_dir",
     "tolerance_pct",
     "prog_id",
+    "n_realizations",
+    "seed",
+    "sampling",
 }
 
 # One field-level prediction stream: TRES[stream][sheet], both named in this
@@ -70,6 +73,11 @@ class Tank:
     index: int | None = None
     # Only the inputs actually given in the YAML are written.
     inputs: dict[str, float] = field(default_factory=dict)
+    # Optional O&G low/high anchors for ensemble sampling. ``stoiip`` remains
+    # the deterministic value used by this simple runner and is interpreted as
+    # the volume mean by mbal_ensemble.py.
+    p90_stoiip: float | None = None
+    p10_stoiip: float | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +107,9 @@ class Config:
     out_dir: str = "simple_output"
     tolerance_pct: float = 0.1
     prog_id: str = "PX32.OpenServer.1"
+    n_realizations: int = 200
+    seed: int = 42
+    sampling: str = "lhs"
 
 
 def _reject_unknown(raw: dict[str, Any], allowed: set[str], where: str) -> None:
@@ -127,10 +138,28 @@ def _parse_tank(item: Any, where: str) -> Tank:
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{where}: {key} must be a positive number")
         inputs[key] = value
+    p90 = None if item.get("p90_stoiip") is None else float(item["p90_stoiip"])
+    p10 = None if item.get("p10_stoiip") is None else float(item["p10_stoiip"])
+    if (p90 is None) != (p10 is None):
+        raise ValueError(
+            f"{where}: p90_stoiip and p10_stoiip must be given together"
+        )
+    if p90 is not None and p10 is not None:
+        mean = inputs["stoiip"]
+        if not (
+            math.isfinite(p90)
+            and math.isfinite(p10)
+            and 0.0 < p90 < mean < p10
+        ):
+            raise ValueError(
+                f"{where}: require 0 < p90_stoiip < stoiip mean < p10_stoiip"
+            )
     return Tank(
         name=str(item["name"]),
         index=None if item.get("index") is None else int(item["index"]),
         inputs=inputs,
+        p90_stoiip=p90,
+        p10_stoiip=p10,
     )
 
 
@@ -200,6 +229,13 @@ def load_config(path: str | Path) -> Config:
     if tag_mode == "index" and any(tank.index is None for tank in tanks):
         raise ValueError(f"{path}: tag_mode: index requires index on every tank")
 
+    n_realizations = int(raw.get("n_realizations", 200))
+    if n_realizations <= 0:
+        raise ValueError(f"{path}: n_realizations must be greater than zero")
+    sampling = str(raw.get("sampling", "lhs")).lower()
+    if sampling not in {"lhs", "mc"}:
+        raise ValueError(f"{path}: sampling must be lhs or mc")
+
     return Config(
         mbal_file=str(raw["mbal_file"]),
         tanks=tanks,
@@ -210,6 +246,9 @@ def load_config(path: str | Path) -> Config:
         out_dir=str(raw.get("out_dir", "simple_output")),
         tolerance_pct=float(raw.get("tolerance_pct", 0.1)),
         prog_id=str(raw.get("prog_id", "PX32.OpenServer.1")),
+        n_realizations=n_realizations,
+        seed=int(raw.get("seed", 42)),
+        sampling=sampling,
     )
 
 

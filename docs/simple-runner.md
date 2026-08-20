@@ -1,15 +1,17 @@
 # Simple runner
 
-`mbal_simple.py` runs one MBAL prediction from one small YAML file. No
-sampling, no percentiles, no plots: the numbers you type are the numbers that
-get written, and one row of results comes back.
+`mbal_simple.py` runs one MBAL prediction from one small YAML file. The numbers
+you type are the numbers that get written, and one row of results comes back.
+After that deterministic path matches, `mbal_ensemble.py` samples volumes and
+reruns this same coupling without introducing a second tag/result model.
 
 It exists to answer one question first — **does a prediction driven from
 Python give the same answer as the same prediction run by hand in MBAL?**
 Until that is yes, nothing built on top of it is worth reading.
 
-The probabilistic runner (`mbal.py` / `mbal_core.py`) is unchanged and still
-there.
+The older probabilistic runner (`mbal.py` / `mbal_core.py`) is unchanged and
+still there, but its per-tank result hierarchy has not matched this model. The
+ensemble command documented below reuses the coupling that did match.
 
 ## The config
 
@@ -136,7 +138,70 @@ equals GUI.
 If `--run` reads back a value MBAL did not accept, it stops before predicting
 rather than reporting a result from inputs that were never applied.
 
-## Output
+## Next step: N volume realizations
+
+Add the ensemble controls and optional tank anchors to the same local YAML:
+
+```yaml
+n_realizations: 200
+seed: 42
+sampling: lhs
+
+tanks:
+  - name: OS-top
+    stoiip: 4.5          # official arithmetic mean
+    p90_stoiip: 3.5      # O&G low case, statistical 10th percentile
+    p10_stoiip: 5.5      # O&G high case, statistical 90th percentile
+  - name: OS-bottom
+    stoiip: 3.0          # fixed when P90/P10 are absent
+```
+
+Inspect the realizations without touching MBAL, then run them:
+
+```text
+python mbal_ensemble.py simple.local.yaml --dry-run --n 200
+python mbal_ensemble.py simple.local.yaml --run --n 200
+```
+
+The positive split-lognormal prior is calibrated to each entered P90,
+arithmetic mean, and P10. Tanks use independent LHS/MC dimensions and
+`stoiip_total` is summed row by row. If tank uncertainties share map/contact/
+net-to-gross risks, independence is an assumption; provide a correlation model
+before using the field spread for a decision.
+
+The distribution each tank actually sampled is recorded in
+`ensemble_summary.csv` as `fitted_median`, `fitted_sigma_low`,
+`fitted_sigma_high` and `fitted_rivals`. Three statistics do not always pin
+down one distribution: once P10/P90 is wide (roughly five or more), the mean
+stops being monotone in the median and a second prior can reproduce the same
+P90, mean and P10 with a visibly different spread. When that happens
+`fitted_rivals` is non-zero and the run warns which median it sampled and which
+it passed over. Narrow the anchors, or supply realizations, rather than
+accepting the pick.
+
+A tank with no P90/P10 is held fixed. If *no* tank has them, `--run` refuses
+rather than spending N MBAL predictions on identical volumes; `--dry-run` warns
+and still writes the (constant) sample table.
+
+For a real campaign, provide per tank: the official arithmetic mean, O&G P90
+(low), O&G P10 (high), and the common OOIP unit. Also choose `n`, the seed, and
+whether tank marginals may be sampled independently. P50 is useful as a check
+but is not required by this fitted prior. If GeoX can export row-level tank
+realizations, prefer that table over three summary statistics: it preserves the
+empirical tails and cross-tank dependence instead of fitting an assumed family.
+Keep aquifer, rock, and operating controls at their verified simple-run values
+unless they are deliberately added as separate uncertainties later.
+
+The run writes `ensemble_samples.csv`, resume-safe `ensemble_results.csv`,
+`ensemble_summary.csv`, and, when `results.profile: true`,
+`ensemble_profiles.csv`. Existing `status == ok` rows are skipped; failures are
+retried, as are nominally successful rows missing a required result. Resume
+stops before opening MBAL if regenerated inputs differ. Use
+`--fresh` to start a new campaign in the same output directory. After the last
+row is durable, the runner reloads the saved model so MBAL is not left showing
+an arbitrary realization's volumes.
+
+## Deterministic output
 
 Each `--baseline` and `--run` appends one row to
 `simple_output/simple_results.csv` with a timestamp, the mode, the inputs and
