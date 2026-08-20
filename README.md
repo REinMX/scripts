@@ -93,8 +93,14 @@ python mbal.py --config mbal_config.local.yaml --validate-config
 # Windows smoke check: dispatch COM, open model, read inputs; no writes
 python mbal.py --config mbal_config.local.yaml --check-openserver
 
+# Base case: one run at the official volumes, no sampling
+python mbal.py --config mbal_config.local.yaml --official-only
+
 # Licensed prediction
 python mbal.py --config mbal_config.local.yaml --n 200
+
+# Discard an existing mbal_results.csv instead of resuming it
+python mbal.py --config mbal_config.local.yaml --n 200 --fresh
 
 # Sweep a configured control without editing the YAML
 python mbal.py --config mbal_config.local.yaml --n 200 --control gas_lift=0,0.5,1.0
@@ -115,7 +121,9 @@ python mbal.py --config mbal_config.local.yaml --summarize-only
 
 On restart, rows with `status == ok` are skipped and failed rows are retried.
 Stored input columns are checked against the deterministic sample table, so a
-changed seed or prior cannot be resumed silently.
+changed seed or prior cannot be resumed silently — that run stops with an
+error. Use `--fresh` to discard the old `mbal_results.csv`, or point
+`--out-dir` somewhere new.
 
 Sensitivity CSVs compare each setting against the lowest value of the swept
 control while holding other controls fixed. They report `delta_P90/P50/P10`,

@@ -1371,8 +1371,8 @@ def _completed_realizations(
     if missing:
         names = ", ".join(sorted(missing))
         raise RuntimeError(
-            f"cannot resume {csv_path}: missing input columns {names}; "
-            "move the old CSV or use a different out_dir"
+            f"cannot resume {csv_path}: missing input columns {names}. "
+            "Re-run with --fresh to discard it, or use a different --out-dir."
         )
 
     previous = previous.drop_duplicates("realization", keep="last").set_index(
@@ -1384,7 +1384,8 @@ def _completed_realizations(
     if unknown:
         raise RuntimeError(
             f"cannot resume {csv_path}: it contains realization IDs outside "
-            "the current sample table"
+            "the current sample table. Re-run with --fresh to discard it, or "
+            "use a different --out-dir."
         )
 
     for realization in known_ids:
@@ -1394,7 +1395,9 @@ def _completed_realizations(
             if not np.isclose(old, new, rtol=1e-10, atol=1e-12):
                 raise RuntimeError(
                     f"cannot resume {csv_path}: realization {realization} "
-                    f"has a different {column}; seed/distributions changed"
+                    f"has a different {column}; seed/distributions changed. "
+                    "Re-run with --fresh to discard it, or use a different "
+                    "--out-dir."
                 )
 
     if "status" in previous.columns:
@@ -2178,6 +2181,22 @@ def build_arg_parser(description: str) -> argparse.ArgumentParser:
         help="sample and report inputs only; never open MBAL",
     )
     parser.add_argument(
+        "--official-only",
+        action="store_true",
+        help=(
+            "one deterministic realization at each tank's official_stoiip; "
+            "ignores p90/p10 and forces --n 1. Swept controls still expand."
+        ),
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help=(
+            "delete the existing results CSV in --out-dir before running, "
+            "instead of resuming it"
+        ),
+    )
+    parser.add_argument(
         "--validate-config",
         action="store_true",
         help=(
@@ -2226,6 +2245,25 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         updates["reconnect_every"] = args.reconnect_every
     if args.stop_on_error:
         updates["stop_on_error"] = True
+    if getattr(args, "official_only", False):
+        updates["n_realizations"] = 1
+        updates["tanks"] = tuple(
+            replace(tank, p90_stoiip=None, p10_stoiip=None) for tank in cfg.tanks
+        )
+        random_aquifers = [
+            tank.key
+            for tank in cfg.tanks
+            for dist in (tank.aquifer_multiplier, tank.aquifer_volume)
+            if dist is not None and _needs_random_dimension(dist)
+        ]
+        if random_aquifers:
+            LOG.warning(
+                "--official-only fixes tank volumes at official_stoiip, but "
+                "tank(s) %s still draw a random aquifer value; there is no "
+                "official aquifer number to pin them to",
+                ", ".join(sorted(set(random_aquifers))),
+            )
+
     for assignment in getattr(args, "control", None) or []:
         name, _, raw = assignment.partition("=")
         name = name.strip()
@@ -2373,6 +2411,15 @@ def main(
         LOG.info("Summarize-only from %s", path)
         summarize(pd.read_csv(path), cfg)
         return 0
+
+    if args.fresh:
+        results_path = os.path.join(cfg.out_dir, cfg.out_csv)
+        if os.path.exists(results_path):
+            os.remove(results_path)
+            LOG.info("--fresh: removed %s", results_path)
+            print(f"--fresh: removed {results_path}")
+        else:
+            LOG.info("--fresh: no results CSV at %s to remove", results_path)
 
     samples = build_sample_table(cfg)
     LOG.info(

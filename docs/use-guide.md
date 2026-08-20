@@ -144,13 +144,57 @@ python mbal.py --config mbal_config.local.yaml --control gas_lift=0,1,2
 python mbal.py --config mbal_config.local.yaml --validate-config   # static check
 python mbal.py --config mbal_config.local.yaml --dry-run --n 200   # volumes only
 python mbal.py --config mbal_config.local.yaml --check-openserver  # COM + tags
-python mbal.py --config mbal_config.local.yaml --n 1               # one realization
+python mbal.py --config mbal_config.local.yaml --official-only     # base case
 python mbal.py --config mbal_config.local.yaml --n 200             # campaign
 ```
 
 On the dry run, check that `stoiip_total` is the row-wise tank sum, that fixed
 tanks equal `official_stoiip` in every row, and that probabilistic tanks
 reproduce the entered P90/P50/P10.
+
+### Base case at the official volumes
+
+`--official-only` runs a single deterministic realization with every tank
+pinned to its `official_stoiip`. It ignores `p90_stoiip`/`p10_stoiip` and
+forces `n_realizations` to 1, so the result is the one scenario your official
+numbers describe — not a sample near it.
+
+```text
+python mbal.py --config mbal_config.local.yaml --official-only --dry-run
+python mbal.py --config mbal_config.local.yaml --official-only
+```
+
+Swept controls still expand, so this is also how you run a control scenario
+grid at the base volumes: three gas-lift rates gives three rows, one per rate,
+all at official STOIIP. Use a separate `--out-dir` to keep the base case
+beside the probabilistic campaign.
+
+If a tank has a random aquifer distribution, the run warns: there is no
+official aquifer number to pin, so it still takes a single random draw.
+
+### Re-running into an existing output directory
+
+The runner resumes by default: rows with `status == ok` are skipped. It
+refuses to resume a results CSV whose stored inputs no longer match the
+regenerated sample table, which is what you hit after changing the seed,
+`n`, or a prior:
+
+```text
+cannot resume ...\mbal_results.csv: realization 0 has a different stoiip_A;
+seed/distributions changed. Re-run with --fresh to discard it, or use a
+different --out-dir.
+```
+
+That guard is deliberate — silently mixing two different priors into one CSV
+would corrupt the percentiles. To start over, either point `--out-dir`
+somewhere new, or discard the old results:
+
+```text
+python mbal.py --config mbal_config.local.yaml --n 200 --fresh
+```
+
+`--fresh` deletes only `mbal_results.csv` in `--out-dir`; summaries and plots
+are rewritten by the run anyway.
 
 ## 6. Sensitivity output
 

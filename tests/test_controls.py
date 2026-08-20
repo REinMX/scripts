@@ -386,3 +386,93 @@ def test_dry_run_cli_sweeps_a_configured_control(tmp_path) -> None:
 def test_unknown_control_on_the_cli_is_rejected(tmp_path) -> None:
     with pytest.raises(SystemExit, match="unknown control"):
         mbal.main(["--dry-run", "--n", "2", "--control", "nope=1,2"])
+
+
+def test_official_only_runs_one_realization_at_official_volumes(tmp_path) -> None:
+    out = tmp_path / "out"
+
+    code = mbal.main(
+        [
+            "--dry-run", "--official-only",
+            "--out-dir", str(out),
+        ]
+    )
+
+    assert code == 0
+    samples = pd.read_csv(out / "samples_dry_run.csv")
+    assert len(samples) == 1
+    assert samples["stoiip_A"].iloc[0] == pytest.approx(4.5)
+    assert samples["stoiip_B"].iloc[0] == pytest.approx(3.0)
+    assert samples["stoiip_C"].iloc[0] == pytest.approx(6.5)
+    assert samples["stoiip_total"].iloc[0] == pytest.approx(14.0)
+
+
+def test_official_only_still_expands_swept_controls(tmp_path) -> None:
+    config = tmp_path / "case.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "controls": [
+                    {"name": "gas_lift", "tag": LIFT_TAG, "values": [0, 0.5, 1.0]}
+                ],
+                "tanks": [
+                    {
+                        "key": "A",
+                        "name": "TANK_A",
+                        "index": 0,
+                        "result_index": 1,
+                        "official_stoiip": 4.5,
+                        "p90_stoiip": 3.5,
+                        "p10_stoiip": 5.5,
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+
+    code = mbal.main(
+        ["--config", str(config), "--dry-run", "--official-only",
+         "--out-dir", str(out)]
+    )
+
+    assert code == 0
+    samples = pd.read_csv(out / "samples_dry_run.csv")
+    assert len(samples) == 3
+    assert samples["stoiip_A"].nunique() == 1
+    assert samples["stoiip_A"].iloc[0] == pytest.approx(4.5)
+    assert sorted(samples["gas_lift"]) == [0.0, 0.5, 1.0]
+
+
+def test_fresh_removes_a_stale_results_csv(tmp_path) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    stale = out / "mbal_results.csv"
+    stale.write_text("realization,stoiip_A\n0,999.0\n", encoding="utf-8")
+
+    code = mbal.main(
+        ["--dry-run", "--n", "3", "--fresh", "--out-dir", str(out)]
+    )
+
+    assert code == 0
+    assert not stale.exists()
+
+
+def test_resume_error_points_at_fresh(tmp_path) -> None:
+    cfg = replace(
+        mbal.default_config(),
+        n_realizations=3,
+        out_dir=str(tmp_path),
+        controls=(),
+    )
+    samples = mbal.build_sample_table(cfg)
+    stale = samples.copy()
+    stale["stoiip_A"] = stale["stoiip_A"] + 1.0
+    stale["status"] = "ok"
+    path = tmp_path / "mbal_results.csv"
+    stale.to_csv(path, index=False)
+
+    with pytest.raises(RuntimeError, match="--fresh"):
+        mbal._completed_realizations(str(path), samples, cfg)
