@@ -9,7 +9,7 @@ The first job is trust: prove that a prediction driven from Python gives the
 same answer as the same prediction run by hand in MBAL.
 
     python mbal_simple.py simple.yaml --show       # resolved tags, no MBAL
-    python mbal_simple.py simple.yaml --check      # read model, compare volumes
+    python mbal_simple.py simple.yaml --check      # read model, compare inputs
     python mbal_simple.py simple.yaml --baseline   # official run, writes nothing
     python mbal_simple.py simple.yaml --run        # write YAML values, predict
     python mbal_simple.py simple.yaml --match      # baseline vs run, side by side
@@ -37,9 +37,15 @@ import yaml
 # Config
 # --------------------------------------------------------------------------
 
-TANK_KEYS = {"name", "stoiip", "index", "result_sheet"}
+# Per-tank inputs, as YAML key -> the suffix appended to MBAL.MB[0].TANK[ref].
+TANK_INPUTS = {
+    "stoiip": "OOIP",
+    "aquifer_volume": "AQUIF.VOLUME",
+    "rock_compressibility": "ROCKCOMPRESS",
+}
+TANK_KEYS = {"name", "index", *TANK_INPUTS}
 CONTROL_KEYS = {"name", "tag", "value"}
-RESULT_KEYS = {"name", "tag", "tank"}
+RESULTS_KEYS = {"stream", "read", "profile"}
 CONFIG_KEYS = {
     "mbal_file",
     "tanks",
@@ -52,13 +58,18 @@ CONFIG_KEYS = {
     "prog_id",
 }
 
+# One field-level prediction stream: TRES[stream][sheet], both named in this
+# model. The trailing [k] on a variable is the row, i.e. the time step.
+DEFAULT_STREAM = "MBAL.MB[0].TRES[{Prediction}][{Prediction}]"
+DEFAULT_READ = {"cum_oil": "CUMOIL", "res_pres": "RESPRESS"}
+
 
 @dataclass(frozen=True)
 class Tank:
     name: str
-    stoiip: float
     index: int | None = None
-    result_sheet: int | str | None = None
+    # Only the inputs actually given in the YAML are written.
+    inputs: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -69,10 +80,12 @@ class Control:
 
 
 @dataclass(frozen=True)
-class ExtraResult:
-    name: str
-    tag: str
-    tank: str | None = None
+class Results:
+    """The prediction stream and the variables read from its last step."""
+
+    stream: str = DEFAULT_STREAM
+    read: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_READ))
+    profile: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,7 +93,7 @@ class Config:
     mbal_file: str
     tanks: tuple[Tank, ...]
     controls: tuple[Control, ...] = ()
-    results: tuple[ExtraResult, ...] = ()
+    results: Results = field(default_factory=Results)
     units: dict[str, str] = field(default_factory=dict)
     tag_mode: str = "name"
     out_dir: str = "simple_output"
@@ -97,6 +110,61 @@ def _reject_unknown(raw: dict[str, Any], allowed: set[str], where: str) -> None:
         )
 
 
+def _parse_tank(item: Any, where: str) -> Tank:
+    if not isinstance(item, dict):
+        raise TypeError(f"{where}: must be a mapping")
+    _reject_unknown(item, TANK_KEYS, where)
+    if not item.get("name"):
+        raise ValueError(f"{where}: name is required")
+    if "stoiip" not in item:
+        raise ValueError(f"{where}: stoiip is required")
+
+    inputs: dict[str, float] = {}
+    for key in TANK_INPUTS:
+        if item.get(key) is None:
+            continue
+        value = float(item[key])
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{where}: {key} must be a positive number")
+        inputs[key] = value
+    return Tank(
+        name=str(item["name"]),
+        index=None if item.get("index") is None else int(item["index"]),
+        inputs=inputs,
+    )
+
+
+def _parse_control(item: Any, where: str) -> Control:
+    if not isinstance(item, dict):
+        raise TypeError(f"{where}: must be a mapping")
+    _reject_unknown(item, CONTROL_KEYS, where)
+    for required in ("name", "tag"):
+        if not item.get(required):
+            raise ValueError(f"{where}: {required} is required")
+    if "value" not in item:
+        raise ValueError(f"{where}: value is required")
+    return Control(name=str(item["name"]), tag=str(item["tag"]), value=item["value"])
+
+
+def _parse_results(raw: Any, where: str) -> Results:
+    if raw is None:
+        return Results()
+    if not isinstance(raw, dict):
+        raise TypeError(f"{where}: must be a mapping")
+    _reject_unknown(raw, RESULTS_KEYS, where)
+    # An absent read: falls back to the default; an empty one is a mistake.
+    read = DEFAULT_READ if raw.get("read") is None else raw["read"]
+    if not isinstance(read, dict):
+        raise TypeError(f"{where}: read must be a mapping of name -> variable")
+    if not read:
+        raise ValueError(f"{where}: read must name at least one variable")
+    return Results(
+        stream=str(raw.get("stream", DEFAULT_STREAM)),
+        read={str(name): str(variable) for name, variable in read.items()},
+        profile=bool(raw.get("profile", False)),
+    )
+
+
 def load_config(path: str | Path) -> Config:
     raw = yaml.safe_load(Path(path).read_text()) or {}
     if not isinstance(raw, dict):
@@ -106,73 +174,25 @@ def load_config(path: str | Path) -> Config:
     if not raw.get("mbal_file"):
         raise ValueError(f"{path}: mbal_file is required")
 
-    tanks: list[Tank] = []
-    for position, item in enumerate(raw.get("tanks") or []):
-        where = f"{path}: tanks[{position}]"
-        if not isinstance(item, dict):
-            raise TypeError(f"{where}: must be a mapping")
-        _reject_unknown(item, TANK_KEYS, where)
-        if not item.get("name"):
-            raise ValueError(f"{where}: name is required")
-        if "stoiip" not in item:
-            raise ValueError(f"{where}: stoiip is required")
-        stoiip = float(item["stoiip"])
-        if not math.isfinite(stoiip) or stoiip <= 0:
-            raise ValueError(f"{where}: stoiip must be a positive number")
-        tanks.append(
-            Tank(
-                name=str(item["name"]),
-                stoiip=stoiip,
-                index=None if item.get("index") is None else int(item["index"]),
-                result_sheet=item.get("result_sheet"),
-            )
-        )
+    tanks = tuple(
+        _parse_tank(item, f"{path}: tanks[{position}]")
+        for position, item in enumerate(raw.get("tanks") or [])
+    )
     if not tanks:
         raise ValueError(f"{path}: at least one tank is required")
-
     names = [tank.name for tank in tanks]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise ValueError(f"{path}: duplicate tank name(s) {', '.join(duplicates)}")
 
-    controls: list[Control] = []
-    for position, item in enumerate(raw.get("controls") or []):
-        where = f"{path}: controls[{position}]"
-        if not isinstance(item, dict):
-            raise TypeError(f"{where}: must be a mapping")
-        _reject_unknown(item, CONTROL_KEYS, where)
-        for required in ("name", "tag"):
-            if not item.get(required):
-                raise ValueError(f"{where}: {required} is required")
-        if "value" not in item:
-            raise ValueError(f"{where}: value is required")
-        controls.append(
-            Control(
-                name=str(item["name"]),
-                tag=str(item["tag"]),
-                value=item["value"],
-            )
-        )
-
-    results: list[ExtraResult] = []
-    for position, item in enumerate(raw.get("results") or []):
-        where = f"{path}: results[{position}]"
-        if not isinstance(item, dict):
-            raise TypeError(f"{where}: must be a mapping")
-        _reject_unknown(item, RESULT_KEYS, where)
-        for required in ("name", "tag"):
-            if not item.get(required):
-                raise ValueError(f"{where}: {required} is required")
-        tank_name = item.get("tank")
-        if tank_name is not None and str(tank_name) not in names:
-            raise ValueError(f"{where}: tank {tank_name} is not in tanks:")
-        results.append(
-            ExtraResult(
-                name=str(item["name"]),
-                tag=str(item["tag"]),
-                tank=None if tank_name is None else str(tank_name),
-            )
-        )
+    controls = tuple(
+        _parse_control(item, f"{path}: controls[{position}]")
+        for position, item in enumerate(raw.get("controls") or [])
+    )
+    control_names = [control.name for control in controls]
+    repeated = sorted({name for name in control_names if control_names.count(name) > 1})
+    if repeated:
+        raise ValueError(f"{path}: duplicate control name(s) {', '.join(repeated)}")
 
     tag_mode = str(raw.get("tag_mode", "name")).lower()
     if tag_mode not in {"name", "index"}:
@@ -182,9 +202,9 @@ def load_config(path: str | Path) -> Config:
 
     return Config(
         mbal_file=str(raw["mbal_file"]),
-        tanks=tuple(tanks),
-        controls=tuple(controls),
-        results=tuple(results),
+        tanks=tanks,
+        controls=controls,
+        results=_parse_results(raw.get("results"), f"{path}: results"),
         units=dict(raw.get("units") or {}),
         tag_mode=tag_mode,
         out_dir=str(raw.get("out_dir", "simple_output")),
@@ -198,51 +218,39 @@ def load_config(path: str | Path) -> Config:
 # --------------------------------------------------------------------------
 
 
-def _unit(cfg: Config, key: str) -> str:
-    unit = cfg.units.get(key)
-    return f'("{unit}")' if unit else ""
-
-
 def _tank_ref(cfg: Config, tank: Tank) -> str:
     if cfg.tag_mode == "index":
         return str(tank.index)
     return "{" + tank.name + "}"
 
 
-def _sheet_ref(cfg: Config, tank: Tank) -> str:
-    if tank.result_sheet is None:
-        return _tank_ref(cfg, tank)
-    if isinstance(tank.result_sheet, int):
-        return str(tank.result_sheet)
-    return "{" + str(tank.result_sheet) + "}"
+def tank_input_tag(cfg: Config, tank: Tank, key: str) -> str:
+    """MBAL.MB[0].TANK[{OS-top}].OOIP, plus a unit qualifier when configured."""
+    unit = cfg.units.get(key)
+    qualifier = f'("{unit}")' if unit else ""
+    return f"MBAL.MB[0].TANK[{_tank_ref(cfg, tank)}].{TANK_INPUTS[key]}{qualifier}"
 
 
-def stoiip_tag(cfg: Config, tank: Tank) -> str:
-    return f"MBAL.MB[0].TANK[{_tank_ref(cfg, tank)}].OOIP{_unit(cfg, 'stoiip')}"
+def tank_inputs(cfg: Config) -> list[tuple[str, str, float]]:
+    """Every configured tank input as (label, tag, value)."""
+    return [
+        (f"{tank.name}.{TANK_INPUTS[key]}", tank_input_tag(cfg, tank, key), value)
+        for tank in cfg.tanks
+        for key, value in tank.inputs.items()
+    ]
 
 
-def count_tag(cfg: Config, tank: Tank) -> str:
-    return f"MBAL.MB[0].TRES[2][{_sheet_ref(cfg, tank)}].COUNT"
+def count_tag(cfg: Config) -> str:
+    """Number of rows in the prediction stream: the time-step count."""
+    return f"{cfg.results.stream}.COUNT"
 
 
-def oil_tag(cfg: Config, tank: Tank, step: int) -> str:
-    ref = _sheet_ref(cfg, tank)
-    return f"MBAL.MB[0].TRES[2][{ref}][{step}].OILRECOVER{_unit(cfg, 'oil')}"
+def result_tag(cfg: Config, variable: str, step: int | str) -> str:
+    """One variable at one time step: ...TRES[..][..][k].CUMOIL
 
-
-def pressure_tag(cfg: Config, tank: Tank, step: int) -> str:
-    ref = _sheet_ref(cfg, tank)
-    return f"MBAL.MB[0].TRES[2][{ref}][{step}].TANKPRESS{_unit(cfg, 'pressure')}"
-
-
-def extra_tag(cfg: Config, result: ExtraResult, last_step: dict[str, int]) -> str:
-    tag = result.tag
-    if result.tank is not None:
-        tank = next(item for item in cfg.tanks if item.name == result.tank)
-        tag = tag.replace("{tank}", _tank_ref(cfg, tank))
-        tag = tag.replace("{sheet}", _sheet_ref(cfg, tank))
-        tag = tag.replace("{k}", str(last_step[result.tank]))
-    return tag
+    ``step`` is the row index; pass "k" to render the shape of the tag.
+    """
+    return f"{cfg.results.stream}[{step}].{variable}"
 
 
 OPEN_TAG = 'MBAL.OPENFILE("{path}")'
@@ -275,7 +283,7 @@ class OpenServer:
     def set(self, tag: str, value: float | str) -> None:
         self._check(self.os.SetValue(tag, value), f"SetValue {tag}")
 
-    def get(self, tag: str) -> float:
+    def get_raw(self, tag: str) -> Any:
         value = self.os.GetValue(tag)
         error = self.os.GetLastError("MBAL")
         if error:
@@ -283,7 +291,10 @@ class OpenServer:
                 f"OpenServer error reading {tag}: "
                 f"{self.os.GetErrorDescription(error)}"
             )
-        return float(value)
+        return value
+
+    def get(self, tag: str) -> float:
+        return float(self.get_raw(tag))
 
 
 def open_model(cfg: Config, srv: Any) -> None:
@@ -299,67 +310,89 @@ def open_model(cfg: Config, srv: Any) -> None:
         ) from error
 
 
+def _as_number(value: Any) -> float | str:
+    """Numbers come back as floats; dates and keywords stay strings."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 # --------------------------------------------------------------------------
 # Read / write / run
 # --------------------------------------------------------------------------
 
 
-def read_volumes(cfg: Config, srv: Any) -> dict[str, float]:
-    """The STOIIP MBAL currently holds, tank by tank."""
-    return {tank.name: srv.get(stoiip_tag(cfg, tank)) for tank in cfg.tanks}
+def read_inputs(cfg: Config, srv: Any) -> dict[str, float]:
+    """The tank inputs MBAL currently holds, for every one this YAML sets."""
+    return {label: srv.get(tag) for label, tag, _value in tank_inputs(cfg)}
 
 
 def write_inputs(cfg: Config, srv: Any) -> list[str]:
-    """Write every YAML volume and control, then read each one back.
+    """Write every tank input and control, then read each one back.
 
-    Returns the tags whose read-back did not match what was written.
+    Returns a description of every value MBAL did not take.
     """
     mismatched: list[str] = []
-    for tank in cfg.tanks:
-        tag = stoiip_tag(cfg, tank)
-        srv.set(tag, tank.stoiip)
+    for _label, tag, value in tank_inputs(cfg):
+        srv.set(tag, value)
         read_back = srv.get(tag)
-        if not _close(read_back, tank.stoiip, cfg.tolerance_pct):
-            mismatched.append(f"{tag} -> wrote {tank.stoiip}, read {read_back}")
+        if not _close(read_back, value, cfg.tolerance_pct):
+            mismatched.append(f"{tag} -> wrote {value}, read {read_back}")
     for control in cfg.controls:
         srv.set(control.tag, control.value)
-        if isinstance(control.value, (int, float)):
-            read_back = srv.get(control.tag)
-            if not _close(read_back, float(control.value), cfg.tolerance_pct):
-                mismatched.append(
-                    f"{control.tag} -> wrote {control.value}, read {read_back}"
-                )
+        if isinstance(control.value, bool) or not isinstance(
+            control.value, (int, float)
+        ):
+            continue  # MBAL may normalise a keyword; only numbers are comparable
+        read_back = srv.get(control.tag)
+        if not _close(read_back, float(control.value), cfg.tolerance_pct):
+            mismatched.append(
+                f"{control.tag} -> wrote {control.value}, read {read_back}"
+            )
     return mismatched
 
 
-def run_prediction(cfg: Config, srv: Any) -> dict[str, float]:
+def step_count(cfg: Config, srv: Any) -> int:
+    tag = count_tag(cfg)
+    steps = int(srv.get(tag))
+    if steps <= 0:
+        raise RuntimeError(
+            f"prediction step COUNT from {tag} must be positive, got {steps}. "
+            "The prediction produced no rows, or the stream name is wrong."
+        )
+    return steps
+
+
+def read_results(cfg: Config, srv: Any) -> dict[str, float | str]:
+    """Every configured variable at the last time step of the prediction."""
+    last = step_count(cfg, srv) - 1
+    return {
+        name: _as_number(srv.get_raw(result_tag(cfg, variable, last)))
+        for name, variable in cfg.results.read.items()
+    }
+
+
+def read_profile(cfg: Config, srv: Any) -> list[dict[str, Any]]:
+    """Every configured variable at every time step."""
+    steps = step_count(cfg, srv)
+    rows: list[dict[str, Any]] = []
+    for step in range(steps):
+        row: dict[str, Any] = {"step": step}
+        for name, variable in cfg.results.read.items():
+            row[name] = _as_number(srv.get_raw(result_tag(cfg, variable, step)))
+        rows.append(row)
+    return rows
+
+
+def run_prediction(cfg: Config, srv: Any) -> dict[str, float | str]:
     srv.cmd(RUN_TAG)
     return read_results(cfg, srv)
 
 
-def read_results(cfg: Config, srv: Any) -> dict[str, float]:
-    """Last prediction step per tank: cumulative oil, tank pressure, total."""
-    out: dict[str, float] = {}
-    last_step: dict[str, int] = {}
-    for tank in cfg.tanks:
-        tag = count_tag(cfg, tank)
-        steps = int(srv.get(tag))
-        if steps <= 0:
-            raise RuntimeError(
-                f"prediction step COUNT from {tag} must be positive, got {steps}. "
-                "The prediction did not produce results."
-            )
-        last = steps - 1
-        last_step[tank.name] = last
-        out[f"np_{tank.name}"] = srv.get(oil_tag(cfg, tank, last))
-        out[f"pres_{tank.name}"] = srv.get(pressure_tag(cfg, tank, last))
-    out["np_total"] = sum(out[f"np_{tank.name}"] for tank in cfg.tanks)
-    for result in cfg.results:
-        out[result.name] = srv.get(extra_tag(cfg, result, last_step))
-    return out
-
-
-def _close(a: float, b: float, tolerance_pct: float) -> bool:
+def _close(a: float | str, b: float | str, tolerance_pct: float) -> bool:
+    if isinstance(a, str) or isinstance(b, str):
+        return a == b
     if not (math.isfinite(a) and math.isfinite(b)):
         return False
     if b == 0:
@@ -372,7 +405,9 @@ def _close(a: float, b: float, tolerance_pct: float) -> bool:
 # --------------------------------------------------------------------------
 
 
-def _fmt(value: float) -> str:
+def _fmt(value: float | str) -> str:
+    if isinstance(value, str):
+        return value
     if not math.isfinite(value):
         return "n/a"
     return f"{value:,.4g}"
@@ -382,8 +417,8 @@ def compare_table(
     title: str,
     left_label: str,
     right_label: str,
-    left: dict[str, float],
-    right: dict[str, float],
+    left: dict[str, float | str],
+    right: dict[str, float | str],
     tolerance_pct: float,
 ) -> tuple[str, bool]:
     """Side-by-side table plus a flag: True when every row is within tolerance."""
@@ -398,8 +433,13 @@ def compare_table(
     for key in keys:
         a = left[key]
         b = right.get(key, float("nan"))
-        diff = b - a
-        pct = diff / a * 100.0 if math.isfinite(a) and a != 0 else float("nan")
+        numeric = not (isinstance(a, str) or isinstance(b, str))
+        diff = b - a if numeric else float("nan")
+        pct = (
+            diff / a * 100.0
+            if numeric and math.isfinite(a) and a != 0
+            else float("nan")
+        )
         ok = _close(b, a, tolerance_pct)
         all_ok = all_ok and ok
         lines.append(
@@ -435,6 +475,17 @@ def write_row(cfg: Config, mode: str, row: dict[str, Any]) -> Path:
     return path
 
 
+def write_profile(cfg: Config, mode: str, rows: list[dict[str, Any]]) -> Path:
+    out_dir = Path(cfg.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"profile_{mode}.csv"
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
 # --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
@@ -445,24 +496,24 @@ def cmd_show(cfg: Config) -> int:
     print(f"tag_mode   {cfg.tag_mode}")
     print(f"tolerance  {cfg.tolerance_pct}%")
     print(f"units      {cfg.units or '(model defaults - set units: to be sure)'}")
-    print("\nvolumes written by --run:")
-    for tank in cfg.tanks:
-        print(f"  {tank.stoiip:>12}  {stoiip_tag(cfg, tank)}")
+
+    print("\ntank inputs written by --run:")
+    for _label, tag, value in tank_inputs(cfg):
+        print(f"  {value:>14}  {tag}")
+
     print("\ncontrols written by --run:")
-    for control in cfg.controls or ():
-        print(f"  {control.value!s:>12}  {control.tag}   ({control.name})")
+    for control in cfg.controls:
+        print(f"  {control.value!s:>14}  {control.tag}   ({control.name})")
     if not cfg.controls:
         print("  (none)")
-    print("\nresults read after each prediction:")
-    for tank in cfg.tanks:
-        print(f"  count      {count_tag(cfg, tank)}")
-        print(f"  np         {oil_tag(cfg, tank, 0).replace('[0].OIL', '[k].OIL')}")
-        print(
-            f"  pressure   "
-            f"{pressure_tag(cfg, tank, 0).replace('[0].TANK', '[k].TANK')}"
-        )
-    for result in cfg.results:
-        print(f"  {result.name:<10} {result.tag}")
+
+    print("\nresults read at the last time step:")
+    print(f"  {'steps':>14}  {count_tag(cfg)}")
+    for name, variable in cfg.results.read.items():
+        print(f"  {name:>14}  {result_tag(cfg, variable, 'k')}")
+    if cfg.results.profile:
+        print("  (profile: true - every step is also written to profile_*.csv)")
+
     if not cfg.units:
         print(
             "\nNo units: set. MBAL then answers in the model's current unit "
@@ -473,10 +524,10 @@ def cmd_show(cfg: Config) -> int:
 
 def cmd_check(cfg: Config, srv: Any) -> int:
     open_model(cfg, srv)
-    in_model = read_volumes(cfg, srv)
-    in_yaml = {tank.name: tank.stoiip for tank in cfg.tanks}
+    in_model = read_inputs(cfg, srv)
+    in_yaml = {label: value for label, _tag, value in tank_inputs(cfg)}
     table, ok = compare_table(
-        "STOIIP: what MBAL holds vs what this YAML would write",
+        "Tank inputs: what MBAL holds vs what this YAML would write",
         "in MBAL",
         "in YAML",
         in_model,
@@ -485,31 +536,44 @@ def cmd_check(cfg: Config, srv: Any) -> int:
     )
     print(table)
     if ok:
-        print("Volumes match. --run will not change the model's STOIIP.")
+        print("Inputs match. --run will not change these values in the model.")
         return 0
     print(
-        "Volumes differ. Either the YAML numbers are not the official ones, or "
+        "Inputs differ. Either the YAML numbers are not the official ones, or "
         "the units differ (set units: stoiip: ...). Fix this before comparing "
         "prediction results."
     )
     return 1
 
 
-def cmd_baseline(cfg: Config, srv: Any) -> dict[str, float]:
+def _finish(
+    cfg: Config,
+    srv: Any,
+    mode: str,
+    inputs: dict[str, Any],
+    elapsed: float,
+    results: dict[str, float | str],
+) -> None:
+    write_row(cfg, mode, {**inputs, **results, "runtime_s": round(elapsed, 2)})
+    if cfg.results.profile:
+        path = write_profile(cfg, mode, read_profile(cfg, srv))
+        print(f"profile written to {path}")
+
+
+def cmd_baseline(cfg: Config, srv: Any) -> dict[str, float | str]:
     """The official run: reload the model, predict, write nothing."""
     open_model(cfg, srv)
-    volumes = read_volumes(cfg, srv)
+    in_model = read_inputs(cfg, srv)
     start = time.time()
     results = run_prediction(cfg, srv)
     elapsed = time.time() - start
     print(f"baseline prediction ran in {elapsed:.1f}s (no inputs written)")
-    write_row(cfg, "baseline", {**{f"stoiip_{k}": v for k, v in volumes.items()},
-                                **results, "runtime_s": round(elapsed, 2)})
+    _finish(cfg, srv, "baseline", in_model, elapsed, results)
     return results
 
 
-def cmd_run(cfg: Config, srv: Any) -> dict[str, float]:
-    """Write the YAML volumes and controls, then predict."""
+def cmd_run(cfg: Config, srv: Any) -> dict[str, float | str]:
+    """Write the YAML inputs and controls, then predict."""
     open_model(cfg, srv)
     mismatched = write_inputs(cfg, srv)
     if mismatched:
@@ -522,9 +586,11 @@ def cmd_run(cfg: Config, srv: Any) -> dict[str, float]:
     results = run_prediction(cfg, srv)
     elapsed = time.time() - start
     print(f"yaml prediction ran in {elapsed:.1f}s ({len(cfg.controls)} controls)")
-    inputs = {f"stoiip_{tank.name}": tank.stoiip for tank in cfg.tanks}
+    inputs: dict[str, Any] = {
+        label: value for label, _tag, value in tank_inputs(cfg)
+    }
     inputs.update({control.name: control.value for control in cfg.controls})
-    write_row(cfg, "run", {**inputs, **results, "runtime_s": round(elapsed, 2)})
+    _finish(cfg, srv, "run", inputs, elapsed, results)
     return results
 
 
@@ -551,8 +617,8 @@ def cmd_match(cfg: Config, srv: Any) -> int:
         return 0
     print(
         f"\nDid not match within {cfg.tolerance_pct}%. Run --check first: if the "
-        "volumes already differ, the YAML is not at the official numbers. If "
-        "they match, a control in the YAML is changing the prediction."
+        "tank inputs already differ, the YAML is not at the official numbers. "
+        "If they match, a control in the YAML is changing the prediction."
     )
     return 1
 
@@ -577,7 +643,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--check",
         action="store_true",
-        help="read the model's STOIIP and compare it with the YAML; no writes",
+        help="read the model's tank inputs and compare them with the YAML",
     )
     mode.add_argument(
         "--baseline",
@@ -587,7 +653,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--run",
         action="store_true",
-        help="write the YAML volumes and controls, then run the prediction",
+        help="write the YAML inputs and controls, then run the prediction",
     )
     mode.add_argument(
         "--match",

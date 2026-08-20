@@ -1,48 +1,60 @@
-# Simple MBAL run. Copy this to simple.local.yaml and put the real paths,
-# tank names and tags there; simple.local.yaml is gitignored.
+# Public anonymized template. Copy to simple.local.yaml (gitignored) and put
+# the real model path, tank names, well names and numbers there.
 #
 #   python mbal_simple.py simple.local.yaml --show      # tags only, no MBAL
-#   python mbal_simple.py simple.local.yaml --check     # volumes in model vs here
-#   python mbal_simple.py simple.local.yaml --match     # official run vs this file
+#   python mbal_simple.py simple.local.yaml --check     # model inputs vs here
+#   python mbal_simple.py simple.local.yaml --match     # official run vs here
 
-mbal_file: C:\Work\Models\three_tank_model.mbi
+mbal_file: C:\Work\Models\model.mbi
 
-# Units MBAL should answer in. Leave a line out and MBAL uses the model's
+# What MBAL should answer in. Leave a line out and MBAL uses the model's
 # current unit set, which is the usual reason Python and the GUI disagree.
-units:
-  stoiip: MMstb
-  oil: MMstb
-  pressure: psia
+units: {}
+# units:
+#   stoiip: MMstb
+#   cum_oil: MMstb
+#   pressure: psia
 
-# One number per tank: the official STOIIP. Names must match MBAL exactly.
+# Per tank. stoiip is required; the other two are written only if given.
+#   stoiip               -> TANK[{name}].OOIP
+#   aquifer_volume       -> TANK[{name}].AQUIF.VOLUME
+#   rock_compressibility -> TANK[{name}].ROCKCOMPRESS
 tanks:
-  - name: REPLACE_WITH_TANK_A_NAME
+  - name: REPLACE_WITH_TOP_TANK
     stoiip: 4.5
-  - name: REPLACE_WITH_TANK_B_NAME
+  - name: REPLACE_WITH_BOTTOM_TANK
     stoiip: 3.0
-  - name: REPLACE_WITH_TANK_C_NAME
-    stoiip: 6.5
 
-# Anything else written before the prediction: gas lift, water injection,
-# constraints. Copy each tag from MBAL with Ctrl+Right-click; do not guess.
-# Leave this empty for the first --match, so nothing but volumes can differ.
+# Anything else written before the prediction: gas lift, injector limits,
+# well PIs. Copy each tag from MBAL with Ctrl+Right-click; do not guess.
+# Leave this empty for the first --match, so only tank inputs can differ.
 controls: []
 # controls:
 #   - name: gas_lift
-#     tag: MBAL.MB[0].PREDINP.CONSTRAINT[1].MAX_GASLIFT
+#     tag: MBAL.MB[0].PREDWELL[{PRODUCER}].GASLIFTRATE
 #     value: 0.5
-#   - name: water_inj_rate
-#     tag: MBAL.MB[0].PREDINP.CONSTRAINT[1].MAXINJWATRATE
-#     value: 300
+#   - name: winj_max_bhp
+#     tag: MBAL.MB[0].PREDWELL[{INJECTOR}].CONSTFBHP
+#     value: 4500
+#   - name: winj_max_rate
+#     tag: MBAL.MB[0].PREDWELL[{INJECTOR}].CONSTRAINTS.MAXRATE
+#     value: 3000
 
-# Cumulative oil and tank pressure are read for every tank already. Add extra
-# reads here. {sheet} and {k} are filled in when tank: is given ({k} is the
-# last prediction step).
-results: []
-# results:
-#   - name: cum_water_inj
-#     tag: MBAL.MB[0].TRES[2][{sheet}][{k}].CUMWATINJ("MMstb")
-#     tank: REPLACE_WITH_TANK_A_NAME
+# One field-level prediction stream. The trailing [k] on a variable is the
+# row, i.e. the time step; COUNT gives how many rows there are, and the last
+# step is COUNT-1. read: is name -> MBAL variable, written verbatim.
+results:
+  stream: MBAL.MB[0].TRES[{Prediction}][{Prediction}]
+  read:
+    date: TIME
+    cum_oil: CUMOIL
+    cum_gas: CUMGAS
+    cum_wat: CUMWAT
+    res_pres: RESPRESS
+    oil_rate: OILRATE
+    wat_inj_rate: WATINJRATE
+    gas_lift_rate: GASLIFTRATE
+  profile: false        # true also writes every time step to profile_*.csv
 
 out_dir: simple_output
 tolerance_pct: 0.1
