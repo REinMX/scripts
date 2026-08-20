@@ -1,0 +1,48 @@
+# Simple MBAL run. Copy this to simple.local.yaml and put the real paths,
+# tank names and tags there; simple.local.yaml is gitignored.
+#
+#   python mbal_simple.py simple.local.yaml --show      # tags only, no MBAL
+#   python mbal_simple.py simple.local.yaml --check     # volumes in model vs here
+#   python mbal_simple.py simple.local.yaml --match     # official run vs this file
+
+mbal_file: C:\Work\Models\three_tank_model.mbi
+
+# Units MBAL should answer in. Leave a line out and MBAL uses the model's
+# current unit set, which is the usual reason Python and the GUI disagree.
+units:
+  stoiip: MMstb
+  oil: MMstb
+  pressure: psia
+
+# One number per tank: the official STOIIP. Names must match MBAL exactly.
+tanks:
+  - name: REPLACE_WITH_TANK_A_NAME
+    stoiip: 4.5
+  - name: REPLACE_WITH_TANK_B_NAME
+    stoiip: 3.0
+  - name: REPLACE_WITH_TANK_C_NAME
+    stoiip: 6.5
+
+# Anything else written before the prediction: gas lift, water injection,
+# constraints. Copy each tag from MBAL with Ctrl+Right-click; do not guess.
+# Leave this empty for the first --match, so nothing but volumes can differ.
+controls: []
+# controls:
+#   - name: gas_lift
+#     tag: MBAL.MB[0].PREDINP.CONSTRAINT[1].MAX_GASLIFT
+#     value: 0.5
+#   - name: water_inj_rate
+#     tag: MBAL.MB[0].PREDINP.CONSTRAINT[1].MAXINJWATRATE
+#     value: 300
+
+# Cumulative oil and tank pressure are read for every tank already. Add extra
+# reads here. {sheet} and {k} are filled in when tank: is given ({k} is the
+# last prediction step).
+results: []
+# results:
+#   - name: cum_water_inj
+#     tag: MBAL.MB[0].TRES[2][{sheet}][{k}].CUMWATINJ("MMstb")
+#     tank: REPLACE_WITH_TANK_A_NAME
+
+out_dir: simple_output
+tolerance_pct: 0.1

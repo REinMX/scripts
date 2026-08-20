@@ -24,6 +24,7 @@ mbal_output/
 mbal_mc_output/
 mbal_gas_lift_output/
 mbal_*_output/
+simple_output/
 output/
 outputs/
 **/mbal_run.log
@@ -35,4 +36,5 @@ outputs/
 **/decision_volume_summary.csv
 **/mbal_results.csv
 **/mbal_*_results.csv
+**/simple_results.csv
 **/*.png

@@ -8,11 +8,28 @@ through OpenServer.
 | `mbal.py` | Command to run |
 | `mbal_core.py` | Sampling, OpenServer, resume, and summaries |
 | `example.yaml` | Small public template; copy it to a local config |
+| `mbal_simple.py` | One deterministic run from a small YAML; no sampling |
+| `simple.yaml` | Template for the simple runner |
+| `docs/simple-runner.md` | Matching the official MBAL run |
 | `docs/use-guide.md` | Volumes, controls, running, resume |
 | `docs/mbal-openserver-runbook.md` | Licensed Windows/OpenServer checks |
 
 Keep real model paths, object names, tags, priors, and results in the
 gitignored `mbal_config.local.yaml`, never in `example.yaml`.
+
+## Start here: match the official run
+
+Before any sampling, prove that a prediction driven from Python equals the
+same prediction run by hand in MBAL. `mbal_simple.py` does only that:
+
+```bash
+python mbal_simple.py simple.local.yaml --show     # resolved tags, no MBAL
+python mbal_simple.py simple.local.yaml --check    # model volumes vs YAML
+python mbal_simple.py simple.local.yaml --match    # official run vs YAML run
+```
+
+See [docs/simple-runner.md](docs/simple-runner.md). The probabilistic runner
+below is unchanged.
 
 ## Volumes
 
