@@ -16,14 +16,25 @@ Therefore a valid tank prior is ordered:
 P90 < P50 < P10
 ```
 
-`official_stoiip` is used as P50 when P90/P10 are supplied. If neither bound
-is supplied, the official value is fixed.
+`official_stoiip` is both the mean and the P50 when P90/P10 are supplied. If
+neither bound is supplied, the official value is fixed in every realization.
 
 ## Per-tank distribution
 
-A probabilistic tank uses a split lognormal anchored at all three entered
-points. Separate lower and upper log-space widths allow asymmetric distances
-from P50 to P90 and P10 while keeping volumes positive.
+A probabilistic tank is sampled from a symmetric prior centred on
+`official_stoiip`, with the standard deviation taken from the entered span:
+
+```text
+sigma = (P10 - P90) / (2 x 1.2816)
+```
+
+Symmetric P90/P10 are reproduced exactly. Asymmetric P90/P10 cannot be: a
+distribution whose mean equals its median is symmetric by definition. The
+entered span is preserved, `official_stoiip` stays the mean, and the run logs
+a warning so the difference is never silent.
+
+Samples are floored at `min_tank_stoiip`. With a span wide enough for that
+floor to bite, the sample mean sits slightly above official and the run warns.
 
 This is only an interpolation between the three volume cases. It is not a
 communication, correlation, or geological dependency model.
@@ -58,8 +69,14 @@ P50(A + B) != P50(A) + P50(B)
 - Mean: arithmetic average across the samples.
 - Standard deviation: spread of the sampled values around the mean.
 
-For skewed distributions the mean need not equal P50. The official value should
-be compared with P50, not with the mean.
+Per tank, the sampled mean and P50 both reproduce `official_stoiip`, so either
+can be compared against the official number.
+
+Field totals are the row-wise sum of independent tanks, so the field mean is
+the sum of the tank means. The field P50 is close to that sum but is not
+guaranteed to equal it, and the field P90/P10 span is narrower than the sum of
+the tank spans because independent tanks do not reach their low or high cases
+together.
 
 ## Paired operational comparisons
 

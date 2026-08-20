@@ -482,3 +482,29 @@ def test_check_openserver_is_windows_only_without_dispatch(tmp_path, capsys) -> 
     assert mbal.main(["--config", str(path), "--check-openserver"]) == 1
     assert "Windows-only" in capsys.readouterr().err
     assert not (tmp_path / "must-not-exist").exists()
+
+
+def test_mbal_is_left_open_by_default() -> None:
+    """OpenServer attaches to a running MBAL; closing it breaks the next run."""
+    cfg = mbal.default_config()
+    assert cfg.close_mbal_on_finish is False
+    assert mbal._close_tag(cfg) is None
+
+    closing = replace(cfg, close_mbal_on_finish=True)
+    assert mbal._close_tag(closing) == closing.tags["cmd_close"]
+
+
+def test_shutdown_without_a_close_tag_sends_nothing() -> None:
+    class RecordingServer(mbal.OpenServer):
+        def __init__(self) -> None:  # no COM dispatch
+            self.commands: list[str] = []
+
+        def cmd(self, command: str) -> None:
+            self.commands.append(command)
+
+    server = RecordingServer()
+    server.shutdown(None)
+    assert server.commands == []
+
+    server.shutdown("MBAL.SHUTDOWN")
+    assert server.commands == ["MBAL.SHUTDOWN"]

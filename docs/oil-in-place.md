@@ -30,17 +30,21 @@ The O&G convention is used:
 Validation requires:
 
 ```text
-0 < P90 < official/P50 < P10
+0 < P90 < official < P10
 ```
 
 P90 and P10 must be present together. Supplying only one is an error.
 
 ## Sampling
 
-For a probabilistic tank, the code uses a split lognormal around the official
-P50. The lower and upper log-space widths are calibrated separately, so the
-sampled 10th, 50th, and 90th statistical percentiles reproduce the entered O&G
-P90, P50, and P10.
+For a probabilistic tank, the code samples a symmetric prior centred on the
+official volume, so official is both the mean and the P50. The standard
+deviation comes from the entered span, `sigma = (P10 - P90) / (2 x 1.2816)`.
+Symmetric P90/P10 are reproduced exactly; asymmetric ones keep official as the
+mean and preserve the span, and the run warns that the sampled P90/P10 differ
+from the entered values.
+
+A tank with no P90/P10 is fixed at official in every realization.
 
 Each tank receives its own LHS or Monte Carlo dimension. No rank, random draw,
 or multiplier is shared between tanks.

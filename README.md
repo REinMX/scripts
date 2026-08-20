@@ -16,13 +16,23 @@ Keep real model paths, object names, priors, and results in the gitignored
 
 ## Volume model
 
-Each tank requires `official_stoiip`.
+Each tank requires `official_stoiip`, which is both the **mean** and the
+**P50** of that tank's prior.
 
-- No P90/P10: use `official_stoiip` as a fixed volume in every realization.
-- Both P90/P10: sample a split-lognormal P90/P50/P10 prior, with
-  `official_stoiip` as P50.
+- No P90/P10: the tank is **fixed** at `official_stoiip` in every realization,
+  so its P90, P50, P10 and mean are all equal and every prediction result
+  driven only by that tank is identical across realizations. The run prints a
+  warning naming these tanks.
+- Both P90/P10: sample a prior centred on `official_stoiip`, with the P90-P10
+  span setting the spread. Symmetric P90/P10 are reproduced exactly; asymmetric
+  ones keep `official_stoiip` as the mean and preserve the span, and the run
+  warns that the sampled P90/P10 will differ from the entered values.
 - P90 and P10 must be supplied together and satisfy
   `0 < P90 < official < P10`.
+- `in_model: false` drops a tank entirely: not sampled, not written to MBAL,
+  not in `stoiip_total`, not in the summary.
+- Unknown keys inside a `tanks:` entry are rejected, so a misspelled
+  `p90_stoiip` fails instead of silently becoming a fixed tank.
 - Tanks are sampled independently with LHS or Monte Carlo.
 - Field STOIIP is calculated for every row:
 
@@ -91,6 +101,11 @@ tanks:
     official_stoiip: 6.5
     p10_stoiip: 8.0
 ```
+
+**MBAL must already be running before a licensed run.** OpenServer attaches to
+a running MBAL and cannot start one. Open MBAL once, clear any startup dialog,
+and leave it open. The runner leaves it open when it finishes; set
+`close_mbal_on_finish: true` only if you want MBAL shut down at the end.
 
 Built-in OpenServer tags cover the normal MBAL hierarchy. Add a `tags:` mapping
 only for version-specific overrides. Copy access strings with Ctrl+Right-click

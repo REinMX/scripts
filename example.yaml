@@ -13,15 +13,24 @@ seed: 42
 sampling: lhs
 out_dir: mbal_output
 
+# MBAL must already be running; OpenServer attaches to it and cannot start it.
+# Leave this false so MBAL stays open for the next run.
+close_mbal_on_finish: false
+
 # Prediction controls. Empty lists disable their sweeps.
 gas_lift_values: []
 water_inj_control: rate_with_bhp_limit
 water_inj_rate_values: []
 water_inj_bhp_values: []
 
-# official_stoiip is required. If P90 and P10 are omitted, the tank is fixed.
-# If both are supplied, official_stoiip is the P50. Tanks are sampled
-# independently and stoiip_total is their row-wise sum.
+# official_stoiip is required and is both the mean and the P50.
+# Omit p90_stoiip/p10_stoiip to hold a tank FIXED at official_stoiip: that
+# tank's P90, P50, P10 and mean will all be equal, and so will any result
+# that depends only on it. Supply both to give it spread.
+# Add "in_model: false" to drop a tank completely - it is then not sampled,
+# not written to MBAL and not counted in stoiip_total.
+# Unknown keys are rejected, so a misspelled p90_stoiip fails loudly.
+# Tanks are sampled independently and stoiip_total is their row-wise sum.
 tanks:
   - key: A
     name: REPLACE_WITH_TANK_A_NAME

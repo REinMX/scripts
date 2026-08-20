@@ -92,7 +92,6 @@ class TankConfig:
     p10_stoiip: float | None = None
     aquifer_multiplier: Distribution | None = None
     aquifer_volume: Distribution | None = None
-    in_model: bool = True
 
 
 def _default_exploration_tanks() -> tuple[TankConfig, ...]:
@@ -209,6 +208,10 @@ class Config:
     out_dir: str = "mbal_output"
     stop_on_error: bool = False
     validate_tags: bool = True
+    # OpenServer attaches to an already-running MBAL; it cannot start one.
+    # Shutting MBAL down at the end of a run therefore breaks the next run,
+    # which is why this defaults to leaving the application open.
+    close_mbal_on_finish: bool = False
     reconnect_every: int = 0  # 0 = never reconnect; N = reopen model every N ok runs
     log_level: str = "INFO"
     extra_percentiles: tuple[float, ...] = ()
@@ -261,13 +264,39 @@ def _optional_float(value: Any) -> float | None:
     return float(value)
 
 
-def _parse_tank(raw: dict[str, Any], position: int) -> TankConfig:
-    for removed_key in ("connectivity", "residual", "role"):
+TANK_KEYS = (
+    "key",
+    "name",
+    "index",
+    "result_index",
+    "in_model",
+    "official_stoiip",
+    "p90_stoiip",
+    "p10_stoiip",
+    "aquifer_multiplier",
+    "aquifer_volume",
+)
+
+
+def _parse_tank(raw: dict[str, Any], position: int) -> TankConfig | None:
+    """Parse one tank block, or return None when in_model is false."""
+    for removed_key in ("connectivity", "residual", "role", "stoiip"):
         if removed_key in raw:
             raise ValueError(
                 f"tank[{position}] {removed_key} was removed; use official_stoiip "
                 "with optional p90_stoiip/p10_stoiip"
             )
+    # Reject typos instead of silently ignoring them: a dropped p90_stoiip
+    # turns an uncertain tank into a fixed one, and every percentile then
+    # collapses onto official_stoiip with no warning.
+    unknown = sorted(set(raw) - set(TANK_KEYS))
+    if unknown:
+        raise ValueError(
+            f"tank[{position}]: unknown key(s) {unknown}; allowed keys are "
+            f"{list(TANK_KEYS)}"
+        )
+    if raw.get("in_model") is False:
+        return None
     if "key" not in raw:
         raise ValueError(f"tank[{position}]: missing key")
     key = str(raw["key"])
@@ -276,11 +305,6 @@ def _parse_tank(raw: dict[str, Any], position: int) -> TankConfig:
     result_index = (
         None if raw.get("result_index") is None else int(raw["result_index"])
     )
-    if raw.get("stoiip") is not None:
-        raise ValueError(
-            f"tank {key}: 'stoiip' distribution blocks were removed; use "
-            "official_stoiip with optional p90_stoiip/p10_stoiip"
-        )
     aquifer_multiplier = None
     if raw.get("aquifer_multiplier") is not None:
         aquifer_multiplier = _parse_distribution(
@@ -294,9 +318,6 @@ def _parse_tank(raw: dict[str, Any], position: int) -> TankConfig:
     official = _optional_float(raw.get("official_stoiip"))
     if official is None:
         raise ValueError(f"tank[{position}] ({key}): missing official_stoiip")
-    in_model = True
-    if "in_model" in raw and raw["in_model"] is not None:
-        in_model = bool(raw["in_model"])
     return TankConfig(
         key=key,
         name=name,
@@ -307,7 +328,6 @@ def _parse_tank(raw: dict[str, Any], position: int) -> TankConfig:
         official_stoiip=official,
         p90_stoiip=_optional_float(raw.get("p90_stoiip")),
         p10_stoiip=_optional_float(raw.get("p10_stoiip")),
-        in_model=in_model,
     )
 
 
@@ -378,7 +398,7 @@ def config_from_dict(data: dict[str, Any], *, base: Config | None = None) -> Con
     if "model" in data and data["model"] is not None and "mbal_file" not in updates:
         updates["mbal_file"] = str(data["model"])
 
-    bool_keys = ("stop_on_error", "validate_tags")
+    bool_keys = ("stop_on_error", "validate_tags", "close_mbal_on_finish")
     for key in bool_keys:
         if key in data and data[key] is not None:
             updates[key] = bool(data[key])
@@ -424,9 +444,18 @@ def config_from_dict(data: dict[str, Any], *, base: Config | None = None) -> Con
     if "tanks" in data and data["tanks"] is not None:
         if not isinstance(data["tanks"], list) or not data["tanks"]:
             raise ValueError("tanks must be a non-empty list")
-        updates["tanks"] = tuple(
-            _parse_tank(item, i) for i, item in enumerate(data["tanks"])
-        )
+        parsed = [_parse_tank(item, i) for i, item in enumerate(data["tanks"])]
+        kept = tuple(tank for tank in parsed if tank is not None)
+        if not kept:
+            raise ValueError("every tank has in_model: false; nothing to run")
+        dropped = [
+            str(item.get("key", position))
+            for position, (item, tank) in enumerate(zip(data["tanks"], parsed))
+            if tank is None
+        ]
+        if dropped:
+            LOG.info("Ignoring tank(s) with in_model: false: %s", ", ".join(dropped))
+        updates["tanks"] = kept
 
     return replace(cfg, **updates)
 
@@ -464,8 +493,6 @@ def config_to_dict(cfg: Config) -> dict[str, Any]:
             item["p90_stoiip"] = tank.p90_stoiip
         if tank.p10_stoiip is not None:
             item["p10_stoiip"] = tank.p10_stoiip
-        if not tank.in_model:
-            item["in_model"] = False
         if tank.aquifer_multiplier is not None:
             item["aquifer_multiplier"] = tank.aquifer_multiplier.to_dict()
         if tank.aquifer_volume is not None:
@@ -486,6 +513,7 @@ def config_to_dict(cfg: Config) -> dict[str, Any]:
         "out_csv": cfg.out_csv,
         "stop_on_error": cfg.stop_on_error,
         "validate_tags": cfg.validate_tags,
+        "close_mbal_on_finish": cfg.close_mbal_on_finish,
         "reconnect_every": cfg.reconnect_every,
         "log_level": cfg.log_level,
         "gas_lift_well": cfg.gas_lift_well,
@@ -622,18 +650,17 @@ def validate_config(cfg: Config) -> None:
                     "tags['aquifer_volume'] is missing; copy the exact string "
                     "from MBAL's OpenServer browser into tags"
                 )
-    modelled_tanks = _tanks_in_model(cfg)
-    if len(modelled_tanks) > 1:
+    if len(cfg.tanks) > 1:
         result_indices = [
             tank.result_index if tank.result_index is not None else tank.index + 1
-            for tank in modelled_tanks
+            for tank in cfg.tanks
         ]
         if 0 in result_indices:
             raise ValueError(
                 "multi-tank result_index cannot be 0 because TRES sheet 0 is consolidated"
             )
         if len(result_indices) != len(set(result_indices)):
-            raise ValueError("duplicate result_index values among in-model tanks")
+            raise ValueError("duplicate result_index values among tanks")
 
     if any(value < 0.0 or not math.isfinite(value) for value in cfg.gas_lift_values):
         raise ValueError("gas-lift sensitivity values must be finite and >= 0")
@@ -685,7 +712,7 @@ def validate_licensed_run_config(
     ):
         problems.append("openserver_prog_id is empty or unresolved")
 
-    for tank in _tanks_in_model(cfg):
+    for tank in cfg.tanks:
         if not tank.name.strip() or _is_example_value(tank.name):
             problems.append(f"tank {tank.key} name is empty or unresolved")
 
@@ -727,10 +754,6 @@ def validate_licensed_run_config(
         raise ValueError(
             "licensed-run config contains example/placeholder values:\n" + details
         )
-
-
-def _tanks_in_model(cfg: Config) -> tuple[TankConfig, ...]:
-    return tuple(tank for tank in cfg.tanks if tank.in_model)
 
 
 def _validate_tank_volumes(cfg: Config) -> None:
@@ -941,10 +964,23 @@ def sample_distribution(dist: Distribution, u: np.ndarray | None, n: int) -> np.
     raise ValueError(f"unknown distribution {dist.kind!r}")
 
 
+Z90 = 1.2815515655446004  # standard normal quantile at 90%
+
+
+def _tank_sigma(p90: float, p10: float) -> float:
+    """Standard deviation implied by the P90-P10 span."""
+    return (p10 - p90) / (2.0 * Z90)
+
+
 def _sample_tank_stoiip(
     tank: TankConfig, u: np.ndarray | None, n: int
 ) -> np.ndarray:
-    """Sample a tank with official=P50 and optional O&G P90/P10 anchors."""
+    """Sample a tank volume centred on official_stoiip.
+
+    official_stoiip is the mean, the median and the mode; the P90-P10 span
+    sets the spread. A symmetric prior is the only way official can be both
+    the mean and the P50, which is what the official volumes represent.
+    """
     official = _required_number(tank.official_stoiip, "official_stoiip")
     if tank.p90_stoiip is None and tank.p10_stoiip is None:
         return np.full(n, official, dtype=float)
@@ -952,12 +988,7 @@ def _sample_tank_stoiip(
         raise ValueError("uncertain tank STOIIP requires a random sample dimension")
     p90 = _required_number(tank.p90_stoiip, "p90_stoiip")
     p10 = _required_number(tank.p10_stoiip, "p10_stoiip")
-    z90 = 1.2815515655446004
-    sigma_low = math.log(official / p90) / z90
-    sigma_high = math.log(p10 / official) / z90
-    z = _norm_ppf(u)
-    sigma = np.where(z < 0.0, sigma_low, sigma_high)
-    return official * np.exp(sigma * z)
+    return official + _tank_sigma(p90, p10) * _norm_ppf(u)
 
 
 def _sensitivity_factors(cfg: Config) -> list[tuple[str, tuple[float, ...]]]:
@@ -1034,12 +1065,6 @@ def build_sample_table(cfg: Config) -> pd.DataFrame:
     data["stoiip_total"] = np.sum(
         np.column_stack([data[column] for column in stoiip_columns]), axis=1
     )
-    in_model_cols = [f"stoiip_{tank.key}" for tank in _tanks_in_model(cfg)]
-    if len(in_model_cols) != len(stoiip_columns):
-        data["stoiip_in_model"] = np.sum(
-            np.column_stack([data[column] for column in in_model_cols]), axis=1
-        )
-
     for tank in cfg.tanks:
         if tank.aquifer_multiplier is not None:
             data[f"aq_mult_{tank.key}"] = draw_distribution(tank.aquifer_multiplier)
@@ -1111,7 +1136,10 @@ class OpenServer:
         except RuntimeError:
             return None
 
-    def shutdown(self, close_tag: str) -> None:
+    def shutdown(self, close_tag: str | None) -> None:
+        """Close MBAL when close_tag is given; otherwise leave it running."""
+        if close_tag is None:
+            return
         with suppress(Exception):
             self.cmd(close_tag)
 
@@ -1119,9 +1147,8 @@ class OpenServer:
         return self
 
     def __exit__(self, *_exc: object) -> None:
-        # Best-effort; callers that own the close tag should call shutdown().
-        with suppress(Exception):
-            self.cmd('MBAL.SHUTDOWN')
+        # Leave MBAL running; callers that want it closed call shutdown().
+        return
 
 
 # -----------------------------------------------------------------------------
@@ -1176,7 +1203,7 @@ def _format_inj_tag(cfg: Config, key: str) -> str:
 def _result_index(cfg: Config, tank: TankConfig) -> int:
     if tank.result_index is not None:
         return tank.result_index
-    if len(_tanks_in_model(cfg)) == 1:
+    if len(cfg.tanks) == 1:
         return 0
     return tank.index + 1
 
@@ -1196,7 +1223,7 @@ def _format_result_tag(
 def input_tags_for_validation(cfg: Config) -> list[tuple[str, str]]:
     """Return (label, tag) pairs that should be readable/writable after open."""
     pairs: list[tuple[str, str]] = []
-    for tank in _tanks_in_model(cfg):
+    for tank in cfg.tanks:
         pairs.append((f"STOIIP/{tank.key}", _stoiip_tag(cfg, tank)))
         if tank.aquifer_multiplier is not None and "aquifer_mult" in cfg.tags:
             pairs.append(
@@ -1245,7 +1272,7 @@ def validate_openserver_tags(srv: OpenServer, cfg: Config) -> None:
 
 def apply_realization(srv: SetServer, row: pd.Series, cfg: Config) -> None:
     """Write each in-model tank's sampled inputs into MBAL."""
-    for tank in _tanks_in_model(cfg):
+    for tank in cfg.tanks:
         volume = max(float(row[f"stoiip_{tank.key}"]), cfg.min_tank_stoiip)
         srv.set(_stoiip_tag(cfg, tank), volume)
         if tank.aquifer_multiplier is not None:
@@ -1303,7 +1330,7 @@ def _apply_water_inj(srv: SetServer, row: pd.Series, cfg: Config) -> None:
 def read_results(srv: OpenServer, cfg: Config, row: pd.Series) -> dict[str, float]:
     """Read the last prediction state for every configured tank."""
     output: dict[str, float] = {}
-    for tank in _tanks_in_model(cfg):
+    for tank in cfg.tanks:
         nsteps_tag = _format_result_tag(cfg, "res_nsteps", tank)
         try:
             nsteps = int(srv.get(nsteps_tag))
@@ -1351,17 +1378,13 @@ def read_results(srv: OpenServer, cfg: Config, row: pd.Series) -> dict[str, floa
         else:
             output[f"rf_{tank.key}"] = cumulative_oil / stoiip
 
-    modelled = _tanks_in_model(cfg)
-    output["np_total"] = sum(output[f"np_{tank.key}"] for tank in modelled)
-    inj_values = [output[f"wi_{tank.key}"] for tank in modelled]
+    output["np_total"] = sum(output[f"np_{tank.key}"] for tank in cfg.tanks)
+    inj_values = [output[f"wi_{tank.key}"] for tank in cfg.tanks]
     if inj_values and all(math.isfinite(value) for value in inj_values):
         output["wi_total"] = sum(inj_values)
     else:
         output["wi_total"] = float("nan")
-    if "stoiip_in_model" in row.index:
-        stoiip_for_rf = float(row["stoiip_in_model"])
-    else:
-        stoiip_for_rf = sum(float(row[f"stoiip_{tank.key}"]) for tank in modelled)
+    stoiip_for_rf = sum(float(row[f"stoiip_{tank.key}"]) for tank in cfg.tanks)
     if stoiip_for_rf == 0.0 or not math.isfinite(stoiip_for_rf):
         output["rf_total"] = float("nan")
     else:
@@ -1387,8 +1410,6 @@ def new_result_record(row: pd.Series, cfg: Config) -> dict[str, object]:
 def _input_columns(cfg: Config) -> list[str]:
     columns = [f"stoiip_{tank.key}" for tank in cfg.tanks]
     columns.append("stoiip_total")
-    if len(_tanks_in_model(cfg)) != len(cfg.tanks):
-        columns.append("stoiip_in_model")
     columns.extend(
         f"aq_mult_{tank.key}"
         for tank in cfg.tanks
@@ -1474,10 +1495,23 @@ def _format_eta(seconds: float) -> str:
     return f"{secs}s"
 
 
+def _close_tag(cfg: Config) -> str | None:
+    """The MBAL close command, or None when MBAL should stay open."""
+    return cfg.tags["cmd_close"] if cfg.close_mbal_on_finish else None
+
+
 def _open_model(cfg: Config) -> OpenServer:
     srv = OpenServer(cfg.openserver_prog_id)
     model_path = cfg.mbal_file.replace('"', '\\"')
-    srv.cmd(cfg.tags["cmd_open"].format(path=model_path))
+    try:
+        srv.cmd(cfg.tags["cmd_open"].format(path=model_path))
+    except RuntimeError as error:
+        raise RuntimeError(
+            f"could not open {cfg.mbal_file} through OpenServer: {error}. "
+            "OpenServer attaches to a running MBAL, it does not start one. "
+            "Launch MBAL, clear any startup dialog, and leave it open, then "
+            "run this again."
+        ) from error
     LOG.info("Opened %s", cfg.mbal_file)
     if cfg.validate_tags:
         validate_openserver_tags(srv, cfg)
@@ -1562,14 +1596,13 @@ def run_monte_carlo(samples: pd.DataFrame, cfg: Config) -> pd.DataFrame:
                     and ok_since_reconnect >= cfg.reconnect_every
                 ):
                     LOG.info(
-                        "Reconnecting OpenServer after %d successful runs",
+                        "Reloading the model after %d successful runs",
                         ok_since_reconnect,
                     )
-                    srv.shutdown(cfg.tags["cmd_close"])
                     srv = _open_model(cfg)
                     ok_since_reconnect = 0
     finally:
-        srv.shutdown(cfg.tags["cmd_close"])
+        srv.shutdown(_close_tag(cfg))
         LOG.info(
             "Session finished in %s",
             _format_eta(time.time() - session_start),
@@ -2133,7 +2166,38 @@ def _volume_source(samples: pd.DataFrame) -> pd.DataFrame:
 def _print_volume_diagnostics(samples: pd.DataFrame, cfg: Config) -> None:
     """Print official and sampled tank/field STOIIP percentiles."""
     source = _volume_source(samples)
-    print("\nVolume prior: official=P50 when optional P90/P10 are supplied.")
+    print(
+        "\nVolume prior: official_stoiip is the mean and the P50; the P90-P10 "
+        "span sets the spread."
+    )
+    for tank in cfg.tanks:
+        if tank.p90_stoiip is None or tank.p10_stoiip is None:
+            continue
+        span = tank.p10_stoiip - tank.p90_stoiip
+        midpoint = 0.5 * (tank.p90_stoiip + tank.p10_stoiip)
+        official = float(tank.official_stoiip or 0.0)
+        if abs(midpoint - official) > 0.02 * span:
+            print(
+                f"Tank {tank.key}: p90/p10 are not symmetric about "
+                f"official_stoiip (midpoint {midpoint:.3f} vs official "
+                f"{official:.3f}). official stays the mean and the p90-p10 span "
+                "is preserved, so the sampled P90/P10 below will differ from "
+                "the values you entered."
+            )
+        if official - 4.0 * _tank_sigma(tank.p90_stoiip, tank.p10_stoiip) <= 0.0:
+            print(
+                f"Tank {tank.key}: the p90-p10 span is wide relative to "
+                "official_stoiip, so a few samples are clipped at "
+                "min_tank_stoiip and the sample mean sits above official."
+            )
+    fixed = [tank.key for tank in cfg.tanks if tank.p90_stoiip is None]
+    if fixed:
+        print(
+            f"Tanks with no p90_stoiip/p10_stoiip are FIXED at official_stoiip: "
+            f"{', '.join(fixed)}. Their P90, P50, P10 and mean are equal by "
+            "construction, and so is every prediction result that depends only "
+            "on them."
+        )
     rows = []
     for tank in cfg.tanks:
         column = f"stoiip_{tank.key}"
@@ -2389,11 +2453,21 @@ def main(
         write_example_config(args.write_example_config)
         return 0
 
+    # Configure logging first: config loading and validation emit warnings
+    # about fixed tanks, dropped tanks and asymmetric priors that must not be
+    # swallowed just because they happen before the run starts.
+    setup_logging(args.log_level or "INFO")
+
     cfg = default_config()
-    if args.config:
-        cfg = load_config_yaml(args.config, base=cfg)
-    cfg = apply_cli_overrides(cfg, args)
-    validate_config(cfg)
+    try:
+        if args.config:
+            cfg = load_config_yaml(args.config, base=cfg)
+        cfg = apply_cli_overrides(cfg, args)
+        validate_config(cfg)
+    except (ValueError, TypeError, KeyError) as error:
+        LOG.error("invalid configuration: %s", error)
+        print(f"Invalid configuration: {error}", file=sys.stderr)
+        return 1
 
     if args.validate_config or args.check_openserver:
         validate_licensed_run_config(cfg, check_model_file=sys.platform == "win32")
@@ -2426,7 +2500,7 @@ def main(
             return 1
         finally:
             if srv is not None:
-                srv.shutdown(cfg.tags["cmd_close"])
+                srv.shutdown(_close_tag(cfg))
         print(
             "OpenServer smoke check passed: COM dispatch, model open, and configured "
             "input-tag reads succeeded. No input was written and no prediction was "

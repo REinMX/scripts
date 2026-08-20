@@ -237,7 +237,6 @@ def test_yaml_gas_lift_config(tmp_path) -> None:
     mbal.validate_config(cfg)
     assert cfg.tag_mode == "name"
     assert len(cfg.tanks) == 3
-    assert all(tank.in_model for tank in cfg.tanks)
     samples = mbal.build_sample_table(
         replace(
             cfg,

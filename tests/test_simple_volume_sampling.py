@@ -66,7 +66,33 @@ def test_sample_table_records_the_minimum_volume_written_to_mbal() -> None:
     assert server.values == [("MBAL.MB[0].TANK[{Tank A}].OOIP", 0.8)]
 
 
-def test_optional_percentiles_anchor_p90_official_p50_and_p10() -> None:
+def test_symmetric_percentiles_are_reproduced_exactly() -> None:
+    cfg = mbal.Config(
+        tanks=(
+            mbal.TankConfig(
+                key="A",
+                name="Tank A",
+                index=0,
+                official_stoiip=10.0,
+                p90_stoiip=6.0,
+                p10_stoiip=14.0,
+            ),
+        ),
+        n_realizations=10_000,
+        seed=17,
+        sampling="lhs",
+    )
+
+    samples = mbal.build_sample_table(cfg)
+
+    values = samples["stoiip_A"].to_numpy(dtype=float)
+    assert np.percentile(values, 10) == pytest.approx(6.0, rel=0.01)
+    assert np.percentile(values, 50) == pytest.approx(10.0, rel=0.01)
+    assert np.percentile(values, 90) == pytest.approx(14.0, rel=0.01)
+
+
+def test_official_stoiip_is_the_mean_as_well_as_the_p50() -> None:
+    """Asymmetric p90/p10 keep official as the mean; the span sets the spread."""
     cfg = mbal.Config(
         tanks=(
             mbal.TankConfig(
@@ -86,9 +112,10 @@ def test_optional_percentiles_anchor_p90_official_p50_and_p10() -> None:
     samples = mbal.build_sample_table(cfg)
 
     values = samples["stoiip_A"].to_numpy(dtype=float)
-    assert np.percentile(values, 10) == pytest.approx(6.0, rel=0.01)
+    assert values.mean() == pytest.approx(10.0, rel=0.01)
     assert np.percentile(values, 50) == pytest.approx(10.0, rel=0.01)
-    assert np.percentile(values, 90) == pytest.approx(18.0, rel=0.01)
+    span = np.percentile(values, 90) - np.percentile(values, 10)
+    assert span == pytest.approx(12.0, rel=0.01)
 
 
 def test_yaml_loads_optional_tank_percentiles(tmp_path) -> None:
@@ -120,6 +147,7 @@ def test_yaml_loads_optional_tank_percentiles(tmp_path) -> None:
     assert cfg.tanks[0].p90_stoiip == 6.0
     assert cfg.tanks[0].p10_stoiip == 18.0
     assert np.percentile(samples["stoiip_A"], 50) == pytest.approx(10.0, rel=0.02)
+    assert samples["stoiip_A"].mean() == pytest.approx(10.0, rel=0.02)
 
 
 def test_removed_volume_model_is_rejected_instead_of_reinterpreted() -> None:
@@ -148,14 +176,13 @@ def test_removed_tank_volume_keys_are_rejected(removed_key: str) -> None:
         mbal.config_from_dict({"tanks": [tank]})
 
 
-def test_default_config_is_three_simple_in_model_tanks() -> None:
+def test_default_config_is_three_simple_tanks() -> None:
     cfg = mbal.default_config()
 
     assert [tank.key for tank in cfg.tanks] == ["A", "B", "C"]
     assert [tank.official_stoiip for tank in cfg.tanks] == [4.5, 3.0, 6.5]
     assert [tank.p90_stoiip for tank in cfg.tanks] == [3.5, None, 5.0]
     assert [tank.p10_stoiip for tank in cfg.tanks] == [5.5, None, 8.0]
-    assert all(tank.in_model for tank in cfg.tanks)
     assert not hasattr(cfg, "volume_model")
     assert not hasattr(cfg.tanks[0], "connectivity")
 
@@ -284,3 +311,70 @@ def test_summary_reports_official_alongside_volume_percentiles(tmp_path) -> None
     written = pd.read_csv(tmp_path / "summary_percentiles.csv")
     assert written["official"].tolist()[:3] == [10.0, 3.0, 13.0]
     assert not (tmp_path / "decision_volume_summary.csv").exists()
+
+
+def test_in_model_false_tank_is_excluded_everywhere() -> None:
+    cfg = mbal.config_from_dict(
+        {
+            "tanks": [
+                {"key": "A", "name": "Tank A", "index": 0, "official_stoiip": 4.0},
+                {
+                    "key": "C",
+                    "name": "Tank C",
+                    "index": 2,
+                    "official_stoiip": 6.0,
+                    "p90_stoiip": 5.0,
+                    "p10_stoiip": 7.0,
+                    "in_model": False,
+                },
+            ],
+            "n_realizations": 20,
+        }
+    )
+
+    assert [tank.key for tank in cfg.tanks] == ["A"]
+
+    samples = mbal.build_sample_table(cfg)
+    assert "stoiip_C" not in samples.columns
+    assert "stoiip_in_model" not in samples.columns
+    assert samples["stoiip_total"].eq(4.0).all()
+
+    summary = mbal.summarize(samples, cfg)
+    field = summary.loc[summary["variable"].str.startswith("Field STOIIP")]
+    assert field["official"].iloc[0] == 4.0
+
+
+def test_all_tanks_out_of_model_is_rejected() -> None:
+    with pytest.raises(ValueError, match="nothing to run"):
+        mbal.config_from_dict(
+            {
+                "tanks": [
+                    {
+                        "key": "A",
+                        "name": "Tank A",
+                        "index": 0,
+                        "official_stoiip": 4.0,
+                        "in_model": False,
+                    }
+                ]
+            }
+        )
+
+
+@pytest.mark.parametrize("typo", ["p90", "p10", "offical_stoiip", "P90_STOIIP"])
+def test_misspelled_tank_keys_are_rejected_not_silently_dropped(typo: str) -> None:
+    """A silently dropped p90_stoiip collapses every percentile onto official."""
+    with pytest.raises(ValueError, match="unknown key"):
+        mbal.config_from_dict(
+            {
+                "tanks": [
+                    {
+                        "key": "A",
+                        "name": "Tank A",
+                        "index": 0,
+                        "official_stoiip": 4.5,
+                        typo: 3.5,
+                    }
+                ]
+            }
+        )

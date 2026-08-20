@@ -2,8 +2,8 @@
 Probabilistic MBAL via Petroleum Experts OpenServer
 ==================================================
 
-One command. Always the same three tanks (working official 4.5 / 3.0 / 6.5
-MSm3, connected-volume prior). Gas lift and water injection are optional
+One command. Each tank is sampled independently around its official STOIIP,
+which is both the mean and the P50. Gas lift and water injection are optional
 sweeps on that ensemble.
 
     python mbal.py --config example.yaml --dry-run --n 200
@@ -14,8 +14,9 @@ sweeps on that ensemble.
     python mbal.py --summarize-only --out-dir mbal_output
     python mbal.py --write-example-config example.yaml
 
-Implementation lives in mbal_core.py. How to run with MBAL open:
-docs/use-guide.md. Why official is not the P50: docs/oil-in-place.md.
+MBAL must already be open: OpenServer attaches to a running MBAL and cannot
+start one. Implementation lives in mbal_core.py. How to run:
+docs/use-guide.md. Volume prior: docs/oil-in-place.md.
 """
 
 from __future__ import annotations

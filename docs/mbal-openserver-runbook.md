@@ -38,16 +38,22 @@ locales ignorados por Git.
 8. Mantén el backup sin tocar. Si MBAL pregunta si debe guardar cambios al
    cerrar, no sobrescribas el backup.
 
+**Antes de cualquier ejecución con licencia, abre MBAL y déjalo abierto.**
+OpenServer se conecta a un MBAL que ya está corriendo; no lo arranca. Abre
+MBAL una vez, cierra cualquier diálogo inicial y no lo cierres entre corridas.
+
 El script envía `MBAL.OPENFILE`, cambia valores en la sesión, ejecuta el comando
-de predicción, lee resultados y envía el comando configurado de cierre. **No
-envía un comando de guardado**, pero eso no sustituye la copia de seguridad:
-MBAL, la instalación o un diálogo pueden tener comportamiento adicional.
+de predicción y lee resultados. Al terminar **deja MBAL abierto** para la
+siguiente corrida; `close_mbal_on_finish: true` envía el comando de cierre
+configurado. **No envía un comando de guardado**, pero eso no sustituye la
+copia de seguridad: MBAL, la instalación o un diálogo pueden tener
+comportamiento adicional.
 
 ## 2. Qué permanece en MBAL y qué cambia Python
 
 | Permanece definido en el `.mbi` | Python cambia o ejecuta por realización |
 |---|---|
-| PVT, contactos, transmisibilidades y acuíferos base | STOIIP de cada tanque `in_model: true` |
+| PVT, contactos, transmisibilidades y acuíferos base | STOIIP de cada tanque configurado |
 | Historia y estado inicial del modelo | Multiplicador o volumen de acuífero, solamente si se configura |
 | Pozos, conexiones, IPR/VLP y equipo | Tasa de gas lift, solamente durante un sweep configurado |
 | Fechas, pasos, constraints y lógica de predicción | Controles de inyección, solamente si se configuran |
@@ -114,7 +120,7 @@ No conviertas todavía un string en plantilla.
 
 ### 4.2 Inputs por tanque
 
-Para cada tanque `in_model: true`:
+Para cada tanque configurado:
 
 1. Navega al campo de STOIIP/OOIP que realmente controla el tanque.
 2. Da foco al campo.
@@ -238,7 +244,7 @@ Ambos YAML deben aparecer como ignorados (`!!` en la vista de ignorados). Edita
 
 - `mbal_file` y `openserver_prog_id`;
 - `tag_mode`;
-- `tanks[].name`, `tanks[].index`, `tanks[].result_index`, `in_model` y priors;
+- `tanks[].name`, `tanks[].index`, `tanks[].result_index` y priors;
 - índice de `PREDINP.CONSTRAINT`, unidad y valores de gas lift;
 - `gas_lift_well` solamente si un tag por pozo fue verificado y configurado;
 - acuíferos opcionales;

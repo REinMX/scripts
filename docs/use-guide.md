@@ -41,7 +41,7 @@ Set the model path and the exact three tank names. For each tank:
   index: 0
   result_index: 1
   p90_stoiip: 3.5       # optional, but P90/P10 are a pair
-  official_stoiip: 4.5  # fixed value, or P50 when P90/P10 exist
+  official_stoiip: 4.5  # fixed value, or the mean and P50 when P90/P10 exist
   p10_stoiip: 5.5
 ```
 
@@ -67,7 +67,9 @@ Check:
 - one `stoiip_<key>` column per tank;
 - `stoiip_total` equals the row-wise tank sum;
 - fixed tanks equal `official_stoiip` in every row;
-- probabilistic tanks reproduce the entered P90/P50/P10 approximately;
+- probabilistic tanks reproduce official as the mean and P50, and reproduce the
+  entered P90/P10 when those are symmetric about official;
+- tanks with no P90/P10 show P90 = P50 = P10 = mean, which is expected;
 - `summary_percentiles.csv` shows the official value beside each distribution.
 
 ## 4. Licensed producer prediction
