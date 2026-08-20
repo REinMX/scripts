@@ -122,32 +122,9 @@ def test_apply_realization_uses_each_tanks_index_and_own_values() -> None:
 
 def test_default_tags_use_the_supported_mbal_openserver_hierarchy() -> None:
     index_tags = mbal.DEFAULT_INDEX_TAGS
-    name_tags = mbal.DEFAULT_NAME_TAGS
 
     assert index_tags["tank_stoiip"] == "MBAL.MB[0].TANK[{i}].OOIP"
     assert index_tags["aquifer_volume"] == "MBAL.MB[0].TANK[{i}].AQUIF.VOLUME"
-    assert (
-        index_tags["gas_lift_rate"]
-        == "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAX_GASLIFT"
-    )
-    assert (
-        index_tags["water_inj_rate"]
-        == "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAXINJWATRATE"
-    )
-    assert (
-        index_tags["water_inj_min_rate"]
-        == "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MININJWATRATE"
-    )
-    assert index_tags["cmd_run_pred"] == "MBAL.MB.RunPrediction"
-    assert index_tags["res_nsteps"] == "MBAL.MB[0].TRES[2][{r}].COUNT"
-    assert "PREDICTION.RESULTS" not in " ".join(index_tags.values())
-
-    cfg = mbal.Config(
-        tanks=(tank("A", 0, 10.0),),
-        tags=dict(name_tags),
-        tag_mode="name",
-    )
-    assert core._stoiip_tag(cfg, cfg.tanks[0]) == "MBAL.MB[0].TANK[{Tank A}].OOIP"
 
 
 def test_new_result_record_has_stable_columns_before_a_failed_run() -> None:
@@ -248,9 +225,6 @@ def test_yaml_config_roundtrip(tmp_path) -> None:
         replace(
             cfg,
             n_realizations=5,
-            water_inj_rate_values=(),
-            water_inj_bhp_values=(),
-            gas_lift_values=(),
         )
     )
     assert len(samples) == 5
@@ -328,29 +302,6 @@ def test_multi_tank_rejects_consolidated_or_duplicate_result_sheets() -> None:
     duplicate_a = replace(tank_a, result_index=1)
     with pytest.raises(ValueError, match="duplicate result_index"):
         mbal.validate_config(index_cfg(tanks=(duplicate_a, tank_b)))
-
-
-def test_gas_lift_tag_uses_the_prediction_constraint_index() -> None:
-    cfg = mbal.Config(
-        tag_mode="index",
-        tags=dict(mbal.DEFAULT_INDEX_TAGS),
-        gas_lift_well="INJ-2",
-        gas_lift_well_index=3,
-        gas_lift_prediction_index=1,
-        gas_lift_values=(0.0, 1.0),
-    )
-    assert (
-        core._gas_lift_tag(cfg)
-        == "MBAL.MB[0].PREDINP.CONSTRAINT[1].MAX_GASLIFT"
-    )
-
-    named = replace(
-        cfg, tag_mode="name", tags=dict(mbal.DEFAULT_NAME_TAGS)
-    )
-    assert (
-        core._gas_lift_tag(named)
-        == "MBAL.MB[0].PREDINP.CONSTRAINT[1].MAX_GASLIFT"
-    )
 
 
 def test_aquifer_distribution_without_its_tag_is_rejected_up_front() -> None:

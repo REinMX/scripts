@@ -4,10 +4,11 @@ Shared core for probabilistic MBAL via Petroleum Experts OpenServer.
 Used by the single CLI: mbal.py
 
 Supports:
-  - three-tank STOIIP inputs: fixed official values or optional P90/P50/P10
-    uncertainty sampled independently per tank
+  - per-tank STOIIP inputs: a fixed official value, or official as the P50 with
+    optional P90/P10 sampled independently per tank
   - optional aquifer parameters
-  - deterministic operational sweeps (gas lift, water-injection rate, BHP)
+  - a generic controls list: any MBAL input written before each prediction,
+    either as a constant or as a deterministic sweep
   - YAML config, resume-safe CSV, tag validation, P90/P50/P10 summaries
 
 This is a dynamic material-balance model. Tank volumes are inputs to MBAL,
@@ -94,6 +95,35 @@ class TankConfig:
     aquifer_volume: Distribution | None = None
 
 
+@dataclass(frozen=True)
+class Control:
+    """One MBAL input written before every prediction.
+
+    A control with ``value`` is a constant, written unchanged in every
+    realization. A control with ``values`` is swept: the sample table is
+    expanded across those values and the control gets its own paired
+    sensitivity table. ``tag`` is a literal OpenServer access string, copied
+    from MBAL with Ctrl+Right-click.
+    """
+
+    name: str
+    tag: str
+    value: float | str | None = None
+    values: tuple[float, ...] = ()
+
+    @property
+    def is_swept(self) -> bool:
+        return bool(self.values)
+
+    def to_dict(self) -> dict[str, Any]:
+        item: dict[str, Any] = {"name": self.name, "tag": self.tag}
+        if self.is_swept:
+            item["values"] = list(self.values)
+        else:
+            item["value"] = self.value
+        return item
+
+
 def _default_exploration_tanks() -> tuple[TankConfig, ...]:
     """Three placeholder MBAL tanks with direct STOIIP uncertainty."""
     return (
@@ -131,13 +161,6 @@ def _default_exploration_tanks() -> tuple[TankConfig, ...]:
 DEFAULT_INDEX_TAGS: dict[str, str] = {
     "tank_stoiip": "MBAL.MB[0].TANK[{i}].OOIP",
     "aquifer_volume": "MBAL.MB[0].TANK[{i}].AQUIF.VOLUME",
-    "gas_lift_rate": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAX_GASLIFT",
-    "water_inj_rate": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAXINJWATRATE",
-    "water_inj_min_rate": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MININJWATRATE",
-    "water_inj_bhp": "MBAL.MB[0].PREDWELL[{i}].CONSTFBHP",
-    "water_inj_max_fbhp": "MBAL.MB[0].PREDWELL[{i}].MAXFBHP",
-    "water_inj_perform": "MBAL.MB[0].PREDWELL[{i}].PERFORMTYPE",
-    "pred_watinj": "MBAL.MB[0].PREDINP.WATINJ",
     "cmd_open": 'MBAL.OPENFILE("{path}")',
     "cmd_run_pred": "MBAL.MB.RunPrediction",
     "cmd_close": "MBAL.SHUTDOWN",
@@ -149,13 +172,6 @@ DEFAULT_INDEX_TAGS: dict[str, str] = {
 DEFAULT_NAME_TAGS: dict[str, str] = {
     "tank_stoiip": "MBAL.MB[0].TANK[{{{tank}}}].OOIP",
     "aquifer_volume": "MBAL.MB[0].TANK[{{{tank}}}].AQUIF.VOLUME",
-    "gas_lift_rate": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAX_GASLIFT",
-    "water_inj_rate": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MAXINJWATRATE",
-    "water_inj_min_rate": "MBAL.MB[0].PREDINP.CONSTRAINT[{p}].MININJWATRATE",
-    "water_inj_bhp": "MBAL.MB[0].PREDWELL[{{{well}}}].CONSTFBHP",
-    "water_inj_max_fbhp": "MBAL.MB[0].PREDWELL[{{{well}}}].MAXFBHP",
-    "water_inj_perform": "MBAL.MB[0].PREDWELL[{{{well}}}].PERFORMTYPE",
-    "pred_watinj": "MBAL.MB[0].PREDINP.WATINJ",
     "cmd_open": 'MBAL.OPENFILE("{path}")',
     "cmd_run_pred": "MBAL.MB.RunPrediction",
     "cmd_close": "MBAL.SHUTDOWN",
@@ -180,23 +196,11 @@ class Config:
     tags: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_NAME_TAGS))
 
 
-    # --- gas lift (optional) -----------------------------------------------
-    # The 2025 default is field-level PREDINP.CONSTRAINT[p].MAX_GASLIFT.
-    # Well name/index are retained only for custom, version-verified tags.
-    gas_lift_well: str = "REPLACE_WITH_GAS_LIFT_WELL_NAME"
-    gas_lift_well_index: int = 0  # used by tag_mode 'index' ({i} in the tag)
-    gas_lift_prediction_index: int = 1  # prediction CONSTRAINT row ({p})
-    gas_lift_values: tuple[float, ...] = ()
-
-    # --- water injector (optional) ----------------------------------------
-    # One WATINJ well linked to both tanks in the .mbi; we set well rate/BHP
-    # and MBAL allocates between tanks from injectivity / pressure.
-    water_inj_well: str = "REPLACE_WITH_WATER_INJ_WELL_NAME"
-    water_inj_well_index: int = 0
-    water_inj_prediction_index: int = 1  # prediction CONSTRAINT row ({p})
-    water_inj_rate_values: tuple[float, ...] = ()
-    water_inj_bhp_values: tuple[float, ...] = ()
-    water_inj_control: str = "rate_with_bhp_limit"
+    # --- prediction controls (optional) ------------------------------------
+    # Any MBAL input written before each prediction: gas lift, injection
+    # rates, constraints, anything else with an OpenServer access string.
+    # Constants are written unchanged; controls with values are swept.
+    controls: tuple[Control, ...] = ()
 
     # --- Monte Carlo -------------------------------------------------------
     n_realizations: int = 200
@@ -218,22 +222,9 @@ class Config:
     min_tank_stoiip: float = 0.01  # floor written to MBAL when sampled volume is 0
 
 
-def default_config(
-    *,
-    gas_lift_values: tuple[float, ...] = (),
-    water_inj_rate_values: tuple[float, ...] = (),
-    water_inj_bhp_values: tuple[float, ...] = (),
-) -> Config:
-    """Three tanks with direct official/P90/P10 volume priors.
-
-    Config() already carries the well. This only fills the optional sweep
-    lists, which are empty unless YAML or the CLI sets them.
-    """
-    return Config(
-        gas_lift_values=gas_lift_values,
-        water_inj_rate_values=water_inj_rate_values,
-        water_inj_bhp_values=water_inj_bhp_values,
-    )
+def default_config(*, controls: tuple[Control, ...] = ()) -> Config:
+    """Three tanks with direct official/P90/P10 volume priors."""
+    return Config(controls=controls)
 
 
 # -----------------------------------------------------------------------------
@@ -347,8 +338,66 @@ def _parse_float_tuple(raw: Any, label: str) -> tuple[float, ...]:
         raise ValueError(f"invalid {label}: {error}") from error
 
 
+CONTROL_KEYS = ("name", "tag", "value", "values")
+
+_REMOVED_CONTROL_KEYS = (
+    "gas_lift_well",
+    "gas_lift_well_index",
+    "gas_lift_prediction_index",
+    "gas_lift_values",
+    "water_inj_well",
+    "water_inj_well_index",
+    "water_inj_prediction_index",
+    "water_inj_rate_values",
+    "water_inj_bhp_values",
+    "water_inj_control",
+)
+
+
+def _parse_control(raw: Any, position: int) -> Control:
+    if not isinstance(raw, dict):
+        raise TypeError(f"controls[{position}]: each control must be a mapping")
+    unknown = sorted(set(raw) - set(CONTROL_KEYS))
+    if unknown:
+        raise ValueError(
+            f"controls[{position}]: unknown key(s) {unknown}; allowed keys are "
+            f"{list(CONTROL_KEYS)}"
+        )
+    name = str(raw.get("name", "")).strip()
+    if not name:
+        raise ValueError(f"controls[{position}]: missing name")
+    tag = str(raw.get("tag", "")).strip()
+    if not tag:
+        raise ValueError(f"control {name}: missing tag")
+    has_value = raw.get("value") is not None
+    has_values = raw.get("values") is not None
+    if has_value == has_values:
+        raise ValueError(
+            f"control {name}: give exactly one of 'value' (a constant) or "
+            "'values' (a list to sweep)"
+        )
+    if has_values:
+        values = _parse_float_tuple(raw["values"], f"control {name} values")
+        if not values:
+            raise ValueError(f"control {name}: 'values' must not be empty")
+        return Control(name=name, tag=tag, values=values)
+    value = raw["value"]
+    if not isinstance(value, (int, float, str)) or isinstance(value, bool):
+        raise TypeError(f"control {name}: 'value' must be a number or a string")
+    return Control(
+        name=name, tag=tag, value=value if isinstance(value, str) else float(value)
+    )
+
+
 def config_from_dict(data: dict[str, Any], *, base: Config | None = None) -> Config:
     """Build a Config from a plain dict (e.g. loaded YAML)."""
+    removed = sorted(key for key in _REMOVED_CONTROL_KEYS if key in data)
+    if removed:
+        raise ValueError(
+            f"{removed} were replaced by a generic 'controls:' list. Each entry "
+            "takes a name, a literal OpenServer tag, and either 'value' for a "
+            "constant or 'values' for a sweep. See README.md."
+        )
     if "volume_model" in data:
         raise ValueError(
             "volume_model was removed; configure each tank with official_stoiip "
@@ -364,9 +413,6 @@ def config_from_dict(data: dict[str, Any], *, base: Config | None = None) -> Con
         "unit_press",
         "unit_cum",
         "tag_mode",
-        "gas_lift_well",
-        "water_inj_well",
-        "water_inj_control",
         "out_csv",
         "out_dir",
         "sampling",
@@ -379,10 +425,6 @@ def config_from_dict(data: dict[str, Any], *, base: Config | None = None) -> Con
     int_keys = (
         "n_realizations",
         "seed",
-        "gas_lift_well_index",
-        "gas_lift_prediction_index",
-        "water_inj_well_index",
-        "water_inj_prediction_index",
         "reconnect_every",
     )
     for key in int_keys:
@@ -403,17 +445,11 @@ def config_from_dict(data: dict[str, Any], *, base: Config | None = None) -> Con
         if key in data and data[key] is not None:
             updates[key] = bool(data[key])
 
-    if "gas_lift_values" in data and data["gas_lift_values"] is not None:
-        updates["gas_lift_values"] = _parse_float_tuple(
-            data["gas_lift_values"], "gas_lift_values"
-        )
-    if "water_inj_rate_values" in data and data["water_inj_rate_values"] is not None:
-        updates["water_inj_rate_values"] = _parse_float_tuple(
-            data["water_inj_rate_values"], "water_inj_rate_values"
-        )
-    if "water_inj_bhp_values" in data and data["water_inj_bhp_values"] is not None:
-        updates["water_inj_bhp_values"] = _parse_float_tuple(
-            data["water_inj_bhp_values"], "water_inj_bhp_values"
+    if "controls" in data and data["controls"] is not None:
+        if not isinstance(data["controls"], list):
+            raise ValueError("controls must be a list")
+        updates["controls"] = tuple(
+            _parse_control(item, i) for i, item in enumerate(data["controls"])
         )
 
     if "extra_percentiles" in data and data["extra_percentiles"] is not None:
@@ -516,16 +552,7 @@ def config_to_dict(cfg: Config) -> dict[str, Any]:
         "close_mbal_on_finish": cfg.close_mbal_on_finish,
         "reconnect_every": cfg.reconnect_every,
         "log_level": cfg.log_level,
-        "gas_lift_well": cfg.gas_lift_well,
-        "gas_lift_well_index": cfg.gas_lift_well_index,
-        "gas_lift_prediction_index": cfg.gas_lift_prediction_index,
-        "gas_lift_values": list(cfg.gas_lift_values),
-        "water_inj_well": cfg.water_inj_well,
-        "water_inj_well_index": cfg.water_inj_well_index,
-        "water_inj_prediction_index": cfg.water_inj_prediction_index,
-        "water_inj_rate_values": list(cfg.water_inj_rate_values),
-        "water_inj_bhp_values": list(cfg.water_inj_bhp_values),
-        "water_inj_control": cfg.water_inj_control,
+        "controls": [control.to_dict() for control in cfg.controls],
         "min_tank_stoiip": cfg.min_tank_stoiip,
         "extra_percentiles": list(cfg.extra_percentiles),
         "tanks": tanks,
@@ -662,15 +689,7 @@ def validate_config(cfg: Config) -> None:
         if len(result_indices) != len(set(result_indices)):
             raise ValueError("duplicate result_index values among tanks")
 
-    if any(value < 0.0 or not math.isfinite(value) for value in cfg.gas_lift_values):
-        raise ValueError("gas-lift sensitivity values must be finite and >= 0")
-    if cfg.gas_lift_values and "gas_lift_rate" not in cfg.tags:
-        raise ValueError("gas_lift_values set but tags['gas_lift_rate'] is missing")
-    if cfg.gas_lift_well_index < 0:
-        raise ValueError("gas_lift_well_index must be non-negative")
-    if cfg.gas_lift_prediction_index < 0:
-        raise ValueError("gas_lift_prediction_index must be non-negative")
-    _validate_water_inj(cfg)
+    _validate_controls(cfg)
 
 
 _EXAMPLE_MBAL_FILE = r"C:\Work\Models\three_tank_model.mbi"
@@ -716,26 +735,11 @@ def validate_licensed_run_config(
         if not tank.name.strip() or _is_example_value(tank.name):
             problems.append(f"tank {tank.key} name is empty or unresolved")
 
-    gas_lift_tag = cfg.tags.get("gas_lift_rate", "")
-    if (
-        cfg.gas_lift_values
-        and _template_uses_object(gas_lift_tag)
-        and (not cfg.gas_lift_well.strip() or _is_example_value(cfg.gas_lift_well))
-    ):
-        problems.append("gas_lift_well is empty or unresolved for its configured tag")
-
-    water_keys = ["water_inj_rate"] if cfg.water_inj_rate_values else []
-    if cfg.water_inj_bhp_values:
-        water_keys.append(_water_inj_bhp_tag_key(cfg))
-        if cfg.water_inj_control.lower() == "bhp":
-            water_keys.append("water_inj_perform")
-    water_uses_object = any(
-        _template_uses_object(cfg.tags.get(key, "")) for key in water_keys
-    )
-    if water_uses_object and (
-        not cfg.water_inj_well.strip() or _is_example_value(cfg.water_inj_well)
-    ):
-        problems.append("water_inj_well is empty or unresolved for its configured tags")
+    for control in cfg.controls:
+        if _is_example_value(control.tag):
+            problems.append(
+                f"control {control.name} tag contains REPLACE_WITH placeholder text"
+            )
 
     for key, value in cfg.tags.items():
         if not value.strip() or _is_example_value(value):
@@ -786,53 +790,47 @@ def _validate_tank_volumes(cfg: Config) -> None:
                 )
 
 
-def _validate_water_inj(cfg: Config) -> None:
-    control = cfg.water_inj_control.lower()
-    if control not in {"rate", "bhp", "rate_with_bhp_limit"}:
-        raise ValueError(
-            "water_inj_control must be 'rate', 'bhp', or 'rate_with_bhp_limit'"
+def _validate_controls(cfg: Config) -> None:
+    """Validate control names, tags and swept values."""
+    reserved = {"realization", "base_realization", "status", "runtime_s"}
+    for tank in cfg.tanks:
+        reserved.update(
+            {
+                f"stoiip_{tank.key}",
+                f"aq_mult_{tank.key}",
+                f"aquifer_volume_{tank.key}",
+            }
         )
-    if any(
-        value < 0.0 or not math.isfinite(value) for value in cfg.water_inj_rate_values
-    ):
-        raise ValueError("water-injection rate values must be finite and >= 0")
-    if any(
-        value <= 0.0 or not math.isfinite(value) for value in cfg.water_inj_bhp_values
-    ):
-        raise ValueError("water-injection BHP values must be finite and > 0")
-    if cfg.water_inj_well_index < 0:
-        raise ValueError("water_inj_well_index must be non-negative")
-    if cfg.water_inj_prediction_index < 0:
-        raise ValueError("water_inj_prediction_index must be non-negative")
+        reserved.update(
+            f"{prefix}_{tank.key}" for prefix in ("np", "pres", "wp", "wi", "rf")
+        )
+    reserved.update({"stoiip_total", "np_total", "wi_total", "rf_total"})
 
-    has_rate = bool(cfg.water_inj_rate_values)
-    has_bhp = bool(cfg.water_inj_bhp_values)
-    if not has_rate and not has_bhp:
-        return
-    if control == "rate" and not has_rate:
-        raise ValueError("water_inj_control='rate' requires water_inj_rate_values")
-    if control == "bhp" and not has_bhp:
-        raise ValueError("water_inj_control='bhp' requires water_inj_bhp_values")
-    if control == "rate_with_bhp_limit" and not has_rate:
-        raise ValueError(
-            "water_inj_control='rate_with_bhp_limit' requires water_inj_rate_values"
-        )
-    if has_rate and "water_inj_rate" not in cfg.tags:
-        raise ValueError(
-            "water_inj_rate_values set but tags['water_inj_rate'] is missing"
-        )
-    if has_bhp:
-        if control == "bhp" and "water_inj_bhp" not in cfg.tags:
+    seen: set[str] = set()
+    for control in cfg.controls:
+        if not _KEY_PATTERN.fullmatch(control.name):
             raise ValueError(
-                "water_inj_bhp_values set but tags['water_inj_bhp'] is missing"
+                f"control name {control.name!r} must start with a letter and "
+                "contain only letters, numbers and underscores"
             )
-        if control != "bhp" and not (
-            "water_inj_max_fbhp" in cfg.tags or "water_inj_bhp" in cfg.tags
-        ):
+        if control.name in seen:
+            raise ValueError(f"duplicate control name {control.name!r}")
+        seen.add(control.name)
+        if control.name in reserved:
             raise ValueError(
-                "water_inj_bhp_values set but tags lack water_inj_max_fbhp / "
-                "water_inj_bhp"
+                f"control name {control.name!r} collides with a results column; "
+                "pick another name"
             )
+        if not control.tag.strip():
+            raise ValueError(f"control {control.name}: tag must not be empty")
+        _validate_openserver_string(control.tag, f"control {control.name} tag")
+        if control.is_swept:
+            if any(not math.isfinite(value) for value in control.values):
+                raise ValueError(
+                    f"control {control.name}: swept values must be finite"
+                )
+        elif control.value is None:
+            raise ValueError(f"control {control.name}: missing value")
 
 
 def lognormal_from_p90_p10(p90: float, p10: float) -> tuple[float, float]:
@@ -967,19 +965,16 @@ def sample_distribution(dist: Distribution, u: np.ndarray | None, n: int) -> np.
 Z90 = 1.2815515655446004  # standard normal quantile at 90%
 
 
-def _tank_sigma(p90: float, p10: float) -> float:
-    """Standard deviation implied by the P90-P10 span."""
-    return (p10 - p90) / (2.0 * Z90)
-
-
 def _sample_tank_stoiip(
     tank: TankConfig, u: np.ndarray | None, n: int
 ) -> np.ndarray:
-    """Sample a tank volume centred on official_stoiip.
+    """Sample a tank volume from its entered P90 / official / P10.
 
-    official_stoiip is the mean, the median and the mode; the P90-P10 span
-    sets the spread. A symmetric prior is the only way official can be both
-    the mean and the P50, which is what the official volumes represent.
+    official_stoiip is the P50. A split lognormal calibrates the lower and
+    upper log-space widths separately, so all three entered values are
+    reproduced exactly and asymmetric ranges keep their skew. The mean is
+    reported next to official and sits above it on a right-skewed tank; that
+    gap is the skew, not an error.
     """
     official = _required_number(tank.official_stoiip, "official_stoiip")
     if tank.p90_stoiip is None and tank.p10_stoiip is None:
@@ -988,19 +983,17 @@ def _sample_tank_stoiip(
         raise ValueError("uncertain tank STOIIP requires a random sample dimension")
     p90 = _required_number(tank.p90_stoiip, "p90_stoiip")
     p10 = _required_number(tank.p10_stoiip, "p10_stoiip")
-    return official + _tank_sigma(p90, p10) * _norm_ppf(u)
+    sigma_low = math.log(official / p90) / Z90
+    sigma_high = math.log(p10 / official) / Z90
+    z = _norm_ppf(u)
+    return official * np.exp(np.where(z < 0.0, sigma_low, sigma_high) * z)
 
 
 def _sensitivity_factors(cfg: Config) -> list[tuple[str, tuple[float, ...]]]:
     """Deterministic operational knobs expanded across every volume sample."""
-    factors: list[tuple[str, tuple[float, ...]]] = []
-    if cfg.gas_lift_values:
-        factors.append(("gas_lift_rate", cfg.gas_lift_values))
-    if cfg.water_inj_rate_values:
-        factors.append(("water_inj_rate", cfg.water_inj_rate_values))
-    if cfg.water_inj_bhp_values:
-        factors.append(("water_inj_bhp", cfg.water_inj_bhp_values))
-    return factors
+    return [
+        (control.name, control.values) for control in cfg.controls if control.is_swept
+    ]
 
 
 def _expand_sensitivity(samples: pd.DataFrame, cfg: Config) -> pd.DataFrame:
@@ -1182,24 +1175,6 @@ def _aquifer_volume_tag(cfg: Config, tank: TankConfig) -> str:
     return template.format(tank=tank.name, i=tank.index)
 
 
-def _gas_lift_tag(cfg: Config) -> str:
-    return cfg.tags["gas_lift_rate"].format(
-        well=cfg.gas_lift_well,
-        i=cfg.gas_lift_well_index,
-        p=cfg.gas_lift_prediction_index,
-    )
-
-
-def _format_inj_tag(cfg: Config, key: str) -> str:
-    return cfg.tags[key].format(
-        well=cfg.water_inj_well,
-        i=cfg.water_inj_well_index,
-        p=cfg.water_inj_prediction_index,
-        tank="",
-        u=cfg.unit_press,
-    )
-
-
 def _result_index(cfg: Config, tank: TankConfig) -> int:
     if tank.result_index is not None:
         return tank.result_index
@@ -1221,35 +1196,16 @@ def _format_result_tag(
 
 
 def input_tags_for_validation(cfg: Config) -> list[tuple[str, str]]:
-    """Return (label, tag) pairs that should be readable/writable after open."""
+    """Input tags this run will write, for the read-only probe after open."""
     pairs: list[tuple[str, str]] = []
     for tank in cfg.tanks:
-        pairs.append((f"STOIIP/{tank.key}", _stoiip_tag(cfg, tank)))
+        pairs.append((f"stoiip_{tank.key}", _stoiip_tag(cfg, tank)))
         if tank.aquifer_multiplier is not None and "aquifer_mult" in cfg.tags:
-            pairs.append(
-                (f"aquifer_mult/{tank.key}", _aquifer_mult_tag(cfg, tank))
-            )
+            pairs.append((f"aq_mult_{tank.key}", _aquifer_mult_tag(cfg, tank)))
         if tank.aquifer_volume is not None and "aquifer_volume" in cfg.tags:
-            pairs.append(
-                (f"aquifer_volume/{tank.key}", _aquifer_volume_tag(cfg, tank))
-            )
-    if cfg.gas_lift_values and "gas_lift_rate" in cfg.tags:
-        pairs.append(("gas_lift_rate", _gas_lift_tag(cfg)))
-    if cfg.water_inj_rate_values and "water_inj_rate" in cfg.tags:
-        pairs.append(("water_inj_rate", _format_inj_tag(cfg, "water_inj_rate")))
-    if cfg.water_inj_bhp_values:
-        bhp_key = _water_inj_bhp_tag_key(cfg)
-        if bhp_key in cfg.tags:
-            pairs.append((bhp_key, _format_inj_tag(cfg, bhp_key)))
+            pairs.append((f"aquifer_volume_{tank.key}", _aquifer_volume_tag(cfg, tank)))
+    pairs.extend((control.name, control.tag) for control in cfg.controls)
     return pairs
-
-
-def _water_inj_bhp_tag_key(cfg: Config) -> str:
-    if cfg.water_inj_control.lower() == "bhp":
-        return "water_inj_bhp"
-    if "water_inj_max_fbhp" in cfg.tags:
-        return "water_inj_max_fbhp"
-    return "water_inj_bhp"
 
 
 def validate_openserver_tags(srv: OpenServer, cfg: Config) -> None:
@@ -1290,41 +1246,16 @@ def apply_realization(srv: SetServer, row: pd.Series, cfg: Config) -> None:
                 float(row[f"aquifer_volume_{tank.key}"]),
             )
 
-    if "gas_lift_rate" in row.index and pd.notna(row["gas_lift_rate"]):
-        srv.set(_gas_lift_tag(cfg), float(row["gas_lift_rate"]))
-
-    _apply_water_inj(srv, row, cfg)
+    for control in cfg.controls:
+        if control.is_swept:
+            if _series_has(row, control.name):
+                srv.set(control.tag, float(row[control.name]))
+        elif control.value is not None:
+            srv.set(control.tag, control.value)
 
 
 def _series_has(row: pd.Series, column: str) -> bool:
     return column in row.index and pd.notna(row[column])
-
-
-def _apply_water_inj(srv: SetServer, row: pd.Series, cfg: Config) -> None:
-    """Write water-injector rate / BHP. One well, both tanks (MBAL allocation)."""
-    has_rate = _series_has(row, "water_inj_rate")
-    has_bhp = _series_has(row, "water_inj_bhp")
-    if not has_rate and not has_bhp:
-        return
-
-    if "pred_watinj" in cfg.tags:
-        srv.set(_format_inj_tag(cfg, "pred_watinj"), "YES")
-
-    control = cfg.water_inj_control.lower()
-    if has_rate:
-        rate = float(row["water_inj_rate"])
-        srv.set(_format_inj_tag(cfg, "water_inj_rate"), rate)
-        if control == "rate" and "water_inj_min_rate" in cfg.tags:
-            srv.set(_format_inj_tag(cfg, "water_inj_min_rate"), rate)
-
-    if has_bhp:
-        bhp = float(row["water_inj_bhp"])
-        if control == "bhp":
-            if "water_inj_perform" in cfg.tags:
-                srv.set(_format_inj_tag(cfg, "water_inj_perform"), "CFBHP")
-            srv.set(_format_inj_tag(cfg, "water_inj_bhp"), bhp)
-        else:
-            srv.set(_format_inj_tag(cfg, _water_inj_bhp_tag_key(cfg)), bhp)
 
 
 def read_results(srv: OpenServer, cfg: Config, row: pd.Series) -> dict[str, float]:
@@ -1762,55 +1693,21 @@ def _plot_tank_metric(
     LOG.info("wrote %s", path)
 
 
-def _summarize_gas_lift(df: pd.DataFrame, cfg: Config) -> None:
-    """Write and plot field-oil sensitivity versus deterministic gas-lift rate."""
-    context_columns = tuple(
-        name
-        for name in ("water_inj_rate", "water_inj_bhp")
-        if name in df.columns
-    )
-    _summarize_operational_sweep(
-        df,
-        cfg,
-        group_columns=("gas_lift_rate", *context_columns),
-        filename="gas_lift_sensitivity",
-        x_column="gas_lift_rate",
-        x_label="Gas lift rate [current MBAL model units]",
-        title="Gas-lift sensitivity",
-        series_column=context_columns[0] if len(context_columns) == 1 else None,
-    )
-
-
-def _summarize_water_inj(df: pd.DataFrame, cfg: Config) -> None:
-    """Write and plot field-oil sensitivity versus injector rate and/or BHP."""
-    water_columns = tuple(
-        name
-        for name in ("water_inj_rate", "water_inj_bhp")
-        if name in df.columns
-    )
-    if not water_columns:
-        return
-    context_columns = ("gas_lift_rate",) if "gas_lift_rate" in df.columns else ()
-    group_columns = (*water_columns, *context_columns)
-    x_column = "water_inj_rate" if "water_inj_rate" in water_columns else "water_inj_bhp"
-    if x_column == "water_inj_rate":
-        x_label = "Water injection rate [current MBAL model units]"
-    else:
-        x_label = "Injector BHP [current MBAL model units]"
-    _summarize_operational_sweep(
-        df,
-        cfg,
-        group_columns=group_columns,
-        filename="water_inj_sensitivity",
-        x_column=x_column,
-        x_label=x_label,
-        title="Water-injection sensitivity",
-        series_column=(
-            next(name for name in group_columns if name != x_column)
-            if len(group_columns) == 2
-            else None
-        ),
-    )
+def _summarize_sweeps(df: pd.DataFrame, cfg: Config) -> None:
+    """Write a paired sensitivity table for every swept control."""
+    swept = [name for name, _values in _sensitivity_factors(cfg)]
+    for name in swept:
+        context = tuple(other for other in swept if other != name)
+        _summarize_operational_sweep(
+            df,
+            cfg,
+            group_columns=(name, *context),
+            filename=f"{name}_sensitivity",
+            x_column=name,
+            x_label=f"{name} [current MBAL model units]",
+            title=f"{name} sensitivity",
+            series_column=context[0] if len(context) == 1 else None,
+        )
 
 
 def _summarize_operational_sweep(
@@ -1836,11 +1733,7 @@ def _summarize_operational_sweep(
             keys = (keys,)
         observed_groups[tuple(float(cast(Any, value)) for value in keys)] = group
 
-    configured_values: dict[str, tuple[float, ...]] = {
-        "gas_lift_rate": cfg.gas_lift_values,
-        "water_inj_rate": cfg.water_inj_rate_values,
-        "water_inj_bhp": cfg.water_inj_bhp_values,
-    }
+    configured_values: dict[str, tuple[float, ...]] = dict(_sensitivity_factors(cfg))
     control_axes: list[tuple[float, ...]] = []
     for column in group_columns:
         values = configured_values.get(column, ())
@@ -2043,7 +1936,7 @@ def summarize(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     # Treat leftover sweep columns from a prior CSV as sweep mode.
     if "base_realization" in df.columns and any(
         column in df.columns
-        for column in ("gas_lift_rate", "water_inj_rate", "water_inj_bhp")
+        for column in (name for name, _values in _sensitivity_factors(cfg))
     ):
         operational_sweep = True
 
@@ -2100,10 +1993,7 @@ def summarize(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         "sampling": cfg.sampling,
         "n_tanks": len(cfg.tanks),
         "volume_prior": "official_with_optional_p90_p10",
-        "gas_lift_values": list(cfg.gas_lift_values),
-        "water_inj_rate_values": list(cfg.water_inj_rate_values),
-        "water_inj_bhp_values": list(cfg.water_inj_bhp_values),
-        "water_inj_control": cfg.water_inj_control,
+        "swept_controls": [name for name, _values in _sensitivity_factors(cfg)],
     }
     meta_path = os.path.join(cfg.out_dir, "run_metadata.csv")
     pd.DataFrame([meta]).to_csv(meta_path, index=False)
@@ -2114,8 +2004,7 @@ def summarize(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     except ImportError:
         LOG.warning("matplotlib not installed - skipping plots")
         if operational_sweep:
-            _summarize_gas_lift(df, cfg)
-            _summarize_water_inj(df, cfg)
+            _summarize_sweeps(df, cfg)
         return summary
 
     _plot_tank_metric(
@@ -2152,8 +2041,7 @@ def summarize(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
             x_label=cfg.unit_press,
             filename="pressure_per_tank.png",
         )
-    _summarize_gas_lift(df, cfg)
-    _summarize_water_inj(df, cfg)
+    _summarize_sweeps(df, cfg)
     return summary
 
 
@@ -2167,29 +2055,9 @@ def _print_volume_diagnostics(samples: pd.DataFrame, cfg: Config) -> None:
     """Print official and sampled tank/field STOIIP percentiles."""
     source = _volume_source(samples)
     print(
-        "\nVolume prior: official_stoiip is the mean and the P50; the P90-P10 "
-        "span sets the spread."
+        "\nVolume prior: official_stoiip is the P50; entered P90/P10 are "
+        "reproduced exactly. mean above official is skew, not an error."
     )
-    for tank in cfg.tanks:
-        if tank.p90_stoiip is None or tank.p10_stoiip is None:
-            continue
-        span = tank.p10_stoiip - tank.p90_stoiip
-        midpoint = 0.5 * (tank.p90_stoiip + tank.p10_stoiip)
-        official = float(tank.official_stoiip or 0.0)
-        if abs(midpoint - official) > 0.02 * span:
-            print(
-                f"Tank {tank.key}: p90/p10 are not symmetric about "
-                f"official_stoiip (midpoint {midpoint:.3f} vs official "
-                f"{official:.3f}). official stays the mean and the p90-p10 span "
-                "is preserved, so the sampled P90/P10 below will differ from "
-                "the values you entered."
-            )
-        if official - 4.0 * _tank_sigma(tank.p90_stoiip, tank.p10_stoiip) <= 0.0:
-            print(
-                f"Tank {tank.key}: the p90-p10 span is wide relative to "
-                "official_stoiip, so a few samples are clipped at "
-                "min_tank_stoiip and the sample mean sits above official."
-            )
     fixed = [tank.key for tank in cfg.tanks if tank.p90_stoiip is None]
     if fixed:
         print(
@@ -2296,35 +2164,14 @@ def build_arg_parser(description: str) -> argparse.ArgumentParser:
         help="abort the run on the first OpenServer failure",
     )
     parser.add_argument(
-        "--gas-lift-values",
+        "--control",
+        action="append",
+        metavar="NAME=v1,v2",
         help=(
-            "comma-separated gas-lift sensitivity values in the current MBAL "
-            "model units, e.g. 0,0.5,1.0,1.5"
+            "sweep a control declared in the config, e.g. "
+            "--control gas_lift=0,0.5,1.0 (repeatable)"
         ),
     )
-    parser.add_argument(
-        "--water-inj-rate-values",
-        help=(
-            "comma-separated water-injection rate sensitivity values in the "
-            "current MBAL model units, e.g. 0,300,600"
-        ),
-    )
-    parser.add_argument(
-        "--water-inj-bhp-values",
-        help=(
-            "comma-separated injector BHP / BHP-limit sensitivity values in "
-            "the current MBAL model units, e.g. 250,300"
-        ),
-    )
-    parser.add_argument(
-        "--water-inj-control",
-        choices=("rate", "bhp", "rate_with_bhp_limit"),
-        help=(
-            "how the injector is controlled: fixed rate, fixed BHP "
-            "(PERFORMTYPE=CFBHP), or rate with a BHP limit"
-        ),
-    )
-
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -2379,29 +2226,26 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         updates["reconnect_every"] = args.reconnect_every
     if args.stop_on_error:
         updates["stop_on_error"] = True
-    if getattr(args, "gas_lift_values", None):
+    for assignment in getattr(args, "control", None) or []:
+        name, _, raw = assignment.partition("=")
+        name = name.strip()
+        if not name or not raw.strip():
+            raise SystemExit(f"invalid --control {assignment!r}: expected NAME=v1,v2")
         try:
-            updates["gas_lift_values"] = _parse_float_tuple(
-                args.gas_lift_values, "--gas-lift-values"
-            )
+            values = _parse_float_tuple(raw, f"--control {name}")
         except ValueError as error:
-            raise SystemExit(f"invalid --gas-lift-values: {error}") from error
-    if getattr(args, "water_inj_rate_values", None):
-        try:
-            updates["water_inj_rate_values"] = _parse_float_tuple(
-                args.water_inj_rate_values, "--water-inj-rate-values"
-            )
-        except ValueError as error:
-            raise SystemExit(f"invalid --water-inj-rate-values: {error}") from error
-    if getattr(args, "water_inj_bhp_values", None):
-        try:
-            updates["water_inj_bhp_values"] = _parse_float_tuple(
-                args.water_inj_bhp_values, "--water-inj-bhp-values"
-            )
-        except ValueError as error:
-            raise SystemExit(f"invalid --water-inj-bhp-values: {error}") from error
-    if getattr(args, "water_inj_control", None):
-        updates["water_inj_control"] = args.water_inj_control
+            raise SystemExit(f"invalid --control {name}: {error}") from error
+        if not values:
+            raise SystemExit(f"invalid --control {name}: no values given")
+        controls = updates.get("controls", cfg.controls)
+        matched = [c for c in controls if c.name == name]
+        if not matched:
+            known = ", ".join(c.name for c in controls) or "none configured"
+            raise SystemExit(f"unknown control {name!r}; configured controls: {known}")
+        updates["controls"] = tuple(
+            replace(c, value=None, values=values) if c.name == name else c
+            for c in controls
+        )
     return replace(cfg, **updates) if updates else cfg
 
 
@@ -2422,10 +2266,7 @@ def write_example_config(path: str) -> None:
         "seed",
         "sampling",
         "out_dir",
-        "gas_lift_values",
-        "water_inj_control",
-        "water_inj_rate_values",
-        "water_inj_bhp_values",
+        "controls",
         "tanks",
     )
     data = {key: full[key] for key in keys}
@@ -2441,10 +2282,10 @@ def main(
     *,
     description: str | None = None,
 ) -> int:
-    """CLI entry: three tanks, optional gas-lift and water-injection sweeps."""
+    """CLI entry: tank volume sampling plus optional control sweeps."""
     desc = description or (
         "Probabilistic MBAL via OpenServer "
-        "(three direct tank-volume priors; optional gas-lift and water injection)"
+        "(direct tank-volume priors; optional prediction-control sweeps)"
     )
     parser = build_arg_parser(desc)
     args = parser.parse_args(argv)

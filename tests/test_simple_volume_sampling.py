@@ -91,8 +91,8 @@ def test_symmetric_percentiles_are_reproduced_exactly() -> None:
     assert np.percentile(values, 90) == pytest.approx(14.0, rel=0.01)
 
 
-def test_official_stoiip_is_the_mean_as_well_as_the_p50() -> None:
-    """Asymmetric p90/p10 keep official as the mean; the span sets the spread."""
+def test_asymmetric_percentiles_are_reproduced_exactly() -> None:
+    """All three entered values are honoured; the mean is skewed above official."""
     cfg = mbal.Config(
         tanks=(
             mbal.TankConfig(
@@ -112,10 +112,11 @@ def test_official_stoiip_is_the_mean_as_well_as_the_p50() -> None:
     samples = mbal.build_sample_table(cfg)
 
     values = samples["stoiip_A"].to_numpy(dtype=float)
-    assert values.mean() == pytest.approx(10.0, rel=0.01)
+    assert np.percentile(values, 10) == pytest.approx(6.0, rel=0.01)
     assert np.percentile(values, 50) == pytest.approx(10.0, rel=0.01)
-    span = np.percentile(values, 90) - np.percentile(values, 10)
-    assert span == pytest.approx(12.0, rel=0.01)
+    assert np.percentile(values, 90) == pytest.approx(18.0, rel=0.01)
+    # official is the P50, so the right-skewed mean sits above it
+    assert values.mean() > 10.5
 
 
 def test_yaml_loads_optional_tank_percentiles(tmp_path) -> None:
@@ -147,7 +148,6 @@ def test_yaml_loads_optional_tank_percentiles(tmp_path) -> None:
     assert cfg.tanks[0].p90_stoiip == 6.0
     assert cfg.tanks[0].p10_stoiip == 18.0
     assert np.percentile(samples["stoiip_A"], 50) == pytest.approx(10.0, rel=0.02)
-    assert samples["stoiip_A"].mean() == pytest.approx(10.0, rel=0.02)
 
 
 def test_removed_volume_model_is_rejected_instead_of_reinterpreted() -> None:
@@ -200,15 +200,11 @@ def test_write_example_config_emits_only_the_normal_user_inputs(tmp_path) -> Non
         "seed",
         "sampling",
         "out_dir",
-        "gas_lift_values",
-        "water_inj_control",
-        "water_inj_rate_values",
-        "water_inj_bhp_values",
+        "controls",
         "tanks",
     }
     assert len(data["tanks"]) == 3
-    assert data["water_inj_rate_values"] == []
-    assert data["water_inj_bhp_values"] == []
+    assert data["controls"] == []
     assert "tags" not in data
 
 

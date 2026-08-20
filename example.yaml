@@ -1,9 +1,9 @@
 # Public anonymized template. Copy this file to mbal_config.local.yaml and
-# keep real paths, tank names, priors, and results out of Git.
+# keep real paths, tank names, tags, priors, and results out of Git.
 #
 # Dry run:
 #   python mbal.py --config mbal_config.local.yaml --dry-run --n 200
-# Licensed Windows run:
+# Licensed Windows run (MBAL must already be open):
 #   python mbal.py --config mbal_config.local.yaml --n 200
 
 mbal_file: C:\Work\Models\three_tank_model.mbi
@@ -17,20 +17,14 @@ out_dir: mbal_output
 # Leave this false so MBAL stays open for the next run.
 close_mbal_on_finish: false
 
-# Prediction controls. Empty lists disable their sweeps.
-gas_lift_values: []
-water_inj_control: rate_with_bhp_limit
-water_inj_rate_values: []
-water_inj_bhp_values: []
-
-# official_stoiip is required and is both the mean and the P50.
+# official_stoiip is required and is the P50.
 # Omit p90_stoiip/p10_stoiip to hold a tank FIXED at official_stoiip: that
 # tank's P90, P50, P10 and mean will all be equal, and so will any result
-# that depends only on it. Supply both to give it spread.
+# that depends only on it. Supply both to give it spread; asymmetric ranges
+# are reproduced exactly and the reported mean will sit above official.
 # Add "in_model: false" to drop a tank completely - it is then not sampled,
 # not written to MBAL and not counted in stoiip_total.
 # Unknown keys are rejected, so a misspelled p90_stoiip fails loudly.
-# Tanks are sampled independently and stoiip_total is their row-wise sum.
 tanks:
   - key: A
     name: REPLACE_WITH_TANK_A_NAME
@@ -52,6 +46,27 @@ tanks:
     official_stoiip: 6.5
     p10_stoiip: 8.0
 
-# Default OpenServer tags are built in. Add a tags: mapping only when an
-# access string differs in your installed MBAL version; copy it with
-# Ctrl+Right-click rather than guessing.
+# Anything written into MBAL before each prediction: gas lift, injection
+# rates, constraints, anything else with an OpenServer access string.
+# Each entry needs a name, a tag, and either:
+#   value:  a constant, written unchanged in every realization
+#   values: a list to sweep, paired against every volume realization and
+#           given its own <name>_sensitivity.csv
+# Copy each tag from MBAL with Ctrl+Right-click; do not guess it.
+controls: []
+# controls:
+#   - name: gas_lift
+#     tag: MBAL.MB[0].PREDINP.CONSTRAINT[1].MAX_GASLIFT
+#     values: [0, 0.5, 1.0]
+#   - name: water_inj_rate
+#     tag: MBAL.MB[0].PREDINP.CONSTRAINT[1].MAXINJWATRATE
+#     values: [0, 300, 600]
+#   - name: water_inj_min_rate
+#     tag: MBAL.MB[0].PREDINP.CONSTRAINT[1].MININJWATRATE
+#     value: 0
+#   - name: pred_watinj
+#     tag: MBAL.MB[0].PREDINP.WATINJ
+#     value: "YES"
+
+# Default OpenServer tags for tanks and results are built in. Add a tags:
+# mapping only when an access string differs in your installed MBAL version.

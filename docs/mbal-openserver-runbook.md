@@ -5,9 +5,7 @@
 > crea la copia de seguridad y recoge los identificadores/tags de esa versión
 > instalada.
 
-Este procedimiento es para ejecutar `mbal.py` (o los nombres históricos
-`probabilistic_mbal_openserver.py` y
-`probabilistic_mbal_openserver_gas_lift.py`) en el mismo equipo Windows que
+Este procedimiento es para ejecutar `mbal.py` en el mismo equipo Windows que
 tiene MBAL y OpenServer licenciados.
 
 
@@ -258,7 +256,6 @@ Validación estática, sin crear outputs y sin abrir MBAL:
 
 ```powershell
 python mbal.py --config .\mbal_config.local.yaml --validate-config
-python probabilistic_mbal_openserver.py --config .\mbal_config.local.yaml --validate-config
 ```
 
 Esta validación detecta estructura, distribuciones, tags obligatorios y textos
@@ -384,22 +381,22 @@ una secuencia operativa, no un tamaño estadístico universal.
 ### 9.2 Sweep pareado de gas lift
 
 Pon el grid privado y su unidad verificada en `mbal_config.local.yaml`, y deja
-vacíos los sweeps de inyección salvo que quieras explícitamente el producto
-cartesiano.
+sin `values:` los controles que no quieras barrer, salvo que busques
+explícitamente el producto cartesiano.
 
 ```powershell
-python probabilistic_mbal_openserver_gas_lift.py --config .\mbal_config.local.yaml --dry-run --n 200 --out-dir .\work\gas_lift_dry
-python probabilistic_mbal_openserver_gas_lift.py --config .\mbal_config.local.yaml --n 200 --out-dir .\work\gas_lift_full
+python mbal.py --config .\mbal_config.local.yaml --dry-run --n 200 --out-dir .\work\gas_lift_dry
+python mbal.py --config .\mbal_config.local.yaml --n 200 --out-dir .\work\gas_lift_full
 ```
 
-El wrapper histórico llama al mismo núcleo mantenido por `mbal.py`. Cada
+Cada
 `base_realization` se repite para todas las tasas: la comparación de lift es
 pareada y no confunde diferencias geológicas con diferencias operativas.
 
 **No agrupes resultados de producción de todas las tasas en un único
 percentil.** `summary_percentiles.csv` resume la geología una vez por
 realización base. Para petróleo por tasa, el resultado canónico es
-`gas_lift_sensitivity.csv` (y su PNG), con P90/P50/P10 absolutos y del delta
+`gas_lift_sensitivity.csv` (nombrado por el control, con su PNG), con P90/P50/P10 absolutos y del delta
 pareado respecto a la tasa mínima. Si también hay inyección, cada combinación
 permanece separada; no se agrupan controles diferentes.
 
@@ -431,8 +428,7 @@ Archivos principales:
 |---|---|
 | `mbal_results.csv` o `out_csv` local | inputs, resultados, status y runtime por fila |
 | `summary_percentiles.csv` | oficial y P90/P50/P10 de tanque/campo; no pool operativo |
-| `gas_lift_sensitivity.csv` | Np absoluto e incremental pareado por tasa de lift |
-| `water_inj_sensitivity.csv` | Np absoluto e incremental pareado por tasa/BHP |
+| `<control>_sensitivity.csv` | Np absoluto e incremental pareado por cada control barrido |
 | `run_metadata.csv` | seed, muestreo y conteos |
 | `mbal_run.log` | errores, progreso y ETA |
 | `*.png` | histogramas, excedencia y sensibilidades |

@@ -1,4 +1,4 @@
-"""Tests for water-injection rate / BHP sensitivity."""
+"""Tests for the generic controls list: constants and swept sensitivities."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import replace
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 import mbal_core as mbal
 
@@ -21,21 +22,42 @@ def tank(key: str, name: str, index: int, official: float) -> mbal.TankConfig:
     )
 
 
-def inj_cfg(**kwargs) -> mbal.Config:
+RATE_TAG = "MBAL.MB[0].PREDINP.CONSTRAINT[1].MAXINJWATRATE"
+MIN_RATE_TAG = "MBAL.MB[0].PREDINP.CONSTRAINT[1].MININJWATRATE"
+BHP_TAG = "MBAL.MB[0].PREDWELL[{INJ1}].MAXFBHP"
+LIFT_TAG = "MBAL.MB[0].PREDINP.CONSTRAINT[1].MAX_GASLIFT"
+
+
+def swept(name: str, tag: str, values: tuple[float, ...]) -> mbal.Control:
+    return mbal.Control(name=name, tag=tag, values=values)
+
+
+def constant(name: str, tag: str, value: float | str) -> mbal.Control:
+    return mbal.Control(name=name, tag=tag, value=value)
+
+
+def inj_cfg(
+    *,
+    rate_values: tuple[float, ...] = (0.0, 300.0, 600.0),
+    bhp_values: tuple[float, ...] = (250.0, 300.0),
+    lift_values: tuple[float, ...] = (),
+    extra: tuple[mbal.Control, ...] = (),
+    **kwargs,
+) -> mbal.Config:
     base = mbal.default_config()
-    tanks = (
-        tank("A", "TANK_A", 0, 4.5),
-        tank("B", "TANK_B", 1, 3.0),
-    )
+    controls = []
+    if lift_values:
+        controls.append(swept("gas_lift_rate", LIFT_TAG, lift_values))
+    if rate_values:
+        controls.append(swept("water_inj_rate", RATE_TAG, rate_values))
+    if bhp_values:
+        controls.append(swept("water_inj_bhp", BHP_TAG, bhp_values))
+    controls.extend(extra)
     updates = {
-        "tanks": tanks,
+        "tanks": (tank("A", "TANK_A", 0, 4.5), tank("B", "TANK_B", 1, 3.0)),
         "n_realizations": 8,
         "seed": 4,
-        "water_inj_well": "INJ1",
-        "water_inj_prediction_index": 1,
-        "water_inj_control": "rate_with_bhp_limit",
-        "water_inj_rate_values": (0.0, 300.0, 600.0),
-        "water_inj_bhp_values": (250.0, 300.0),
+        "controls": tuple(controls),
     }
     updates.update(kwargs)
     return replace(base, **updates)
@@ -64,84 +86,84 @@ def test_water_inj_sweep_pairs_rate_and_bhp_across_volume_samples() -> None:
         assert paired["stoiip_total"].nunique() == 1
 
 
-def test_apply_realization_writes_rate_and_bhp_limit_tags() -> None:
-    cfg = inj_cfg()
-    row = pd.Series(
-        {
-            "stoiip_A": 4.1,
-            "stoiip_B": 2.7,
-            "water_inj_rate": 300.0,
-            "water_inj_bhp": 280.0,
-        }
+def test_apply_realization_writes_swept_and_constant_controls() -> None:
+    """Configured tags are written verbatim; no control-specific logic."""
+    cfg = inj_cfg(
+        rate_values=(400.0,),
+        bhp_values=(),
+        extra=(
+            constant("water_inj_min_rate", MIN_RATE_TAG, 400.0),
+            constant("pred_watinj", "MBAL.MB[0].PREDINP.WATINJ", "YES"),
+        ),
     )
+    row = pd.Series({"stoiip_A": 4.1, "stoiip_B": 2.7, "water_inj_rate": 400.0})
     server = RecordingServer()
 
     mbal.apply_realization(server, row, cfg)
 
+    assert (RATE_TAG, 400.0) in server.values
+    assert (MIN_RATE_TAG, 400.0) in server.values
     assert ("MBAL.MB[0].PREDINP.WATINJ", "YES") in server.values
-    assert (
-        "MBAL.MB[0].PREDINP.CONSTRAINT[1].MAXINJWATRATE",
-        300.0,
-    ) in server.values
-    assert ("MBAL.MB[0].PREDWELL[{INJ1}].MAXFBHP", 280.0) in server.values
-    assert ("MBAL.MB[0].TANK[{TANK_A}].OOIP", 4.1) in server.values
-    assert ("MBAL.MB[0].TANK[{TANK_B}].OOIP", 2.7) in server.values
-    assert not any(".MAXRATE" in tag for tag, _value in server.values)
 
 
-def test_apply_realization_bhp_control_sets_cfbhp() -> None:
-    cfg = inj_cfg(
-        water_inj_control="bhp",
-        water_inj_rate_values=(),
-        water_inj_bhp_values=(260.0,),
-    )
-    row = pd.Series(
-        {
-            "stoiip_A": 4.1,
-            "stoiip_B": 2.7,
-            "water_inj_bhp": 260.0,
-        }
-    )
+def test_a_swept_control_absent_from_the_row_is_skipped() -> None:
+    cfg = inj_cfg(rate_values=(400.0,), bhp_values=())
+    row = pd.Series({"stoiip_A": 4.1, "stoiip_B": 2.7})
     server = RecordingServer()
 
     mbal.apply_realization(server, row, cfg)
 
-    assert ("MBAL.MB[0].PREDWELL[{INJ1}].PERFORMTYPE", "CFBHP") in server.values
-    assert ("MBAL.MB[0].PREDWELL[{INJ1}].CONSTFBHP", 260.0) in server.values
+    assert all(tag != RATE_TAG for tag, _value in server.values)
 
 
-def test_rate_control_pins_min_rate() -> None:
-    cfg = inj_cfg(
-        water_inj_control="rate",
-        water_inj_bhp_values=(),
-        water_inj_rate_values=(400.0,),
-    )
-    row = pd.Series(
-        {
-            "stoiip_A": 4.1,
-            "stoiip_B": 2.7,
-            "water_inj_rate": 400.0,
-        }
-    )
-    server = RecordingServer()
-
-    mbal.apply_realization(server, row, cfg)
-
-    assert (
-        "MBAL.MB[0].PREDINP.CONSTRAINT[1].MAXINJWATRATE",
-        400.0,
-    ) in server.values
-    assert (
-        "MBAL.MB[0].PREDINP.CONSTRAINT[1].MININJWATRATE",
-        400.0,
-    ) in server.values
+def test_control_values_must_be_finite() -> None:
+    with pytest.raises(ValueError, match="swept values must be finite"):
+        mbal.validate_config(inj_cfg(rate_values=(0.0, float("nan"))))
 
 
-def test_negative_rate_and_nonpositive_bhp_are_rejected() -> None:
-    with pytest.raises(ValueError, match="water-injection rate"):
-        mbal.validate_config(inj_cfg(water_inj_rate_values=(0.0, -10.0)))
-    with pytest.raises(ValueError, match="water-injection BHP"):
-        mbal.validate_config(inj_cfg(water_inj_bhp_values=(0.0, 250.0)))
+def test_a_control_needs_exactly_one_of_value_or_values() -> None:
+    with pytest.raises(ValueError, match="exactly one of"):
+        mbal.config_from_dict(
+            {"controls": [{"name": "lift", "tag": LIFT_TAG, "value": 1.0,
+                           "values": [1.0, 2.0]}]}
+        )
+    with pytest.raises(ValueError, match="exactly one of"):
+        mbal.config_from_dict({"controls": [{"name": "lift", "tag": LIFT_TAG}]})
+
+
+def test_duplicate_and_colliding_control_names_are_rejected() -> None:
+    with pytest.raises(ValueError, match="duplicate control name"):
+        mbal.validate_config(
+            inj_cfg(
+                rate_values=(1.0,),
+                bhp_values=(),
+                extra=(swept("water_inj_rate", MIN_RATE_TAG, (2.0,)),),
+            )
+        )
+    with pytest.raises(ValueError, match="collides with a results column"):
+        mbal.validate_config(
+            inj_cfg(
+                rate_values=(),
+                bhp_values=(),
+                extra=(swept("stoiip_total", LIFT_TAG, (1.0,)),),
+            )
+        )
+
+
+def test_unknown_control_key_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown key"):
+        mbal.config_from_dict(
+            {"controls": [{"name": "lift", "tag": LIFT_TAG, "vals": [1.0]}]}
+        )
+
+
+@pytest.mark.parametrize(
+    "removed",
+    ["gas_lift_values", "water_inj_rate_values", "water_inj_control"],
+)
+def test_removed_named_control_keys_point_at_the_controls_list(removed: str) -> None:
+    with pytest.raises(ValueError, match="controls"):
+        mbal.config_from_dict({removed: [1.0]})
 
 
 def test_water_inj_summary_does_not_pool_across_settings(tmp_path) -> None:
@@ -170,7 +192,7 @@ def test_water_inj_summary_does_not_pool_across_settings(tmp_path) -> None:
         "Field STOIIP [MSm3]",
     ]
 
-    table = pd.read_csv(tmp_path / "water_inj_sensitivity.csv")
+    table = pd.read_csv(tmp_path / "water_inj_rate_sensitivity.csv")
     assert len(table) == 6
     present = table.loc[
         (table["water_inj_bhp"] == 250.0)
@@ -180,15 +202,15 @@ def test_water_inj_summary_does_not_pool_across_settings(tmp_path) -> None:
     missing = table.loc[table["n_rows"] == 0]
     assert len(missing) == 4
     assert (missing["n_missing"] == cfg.n_realizations).all()
-    assert (tmp_path / "water_inj_sensitivity.png").exists()
+    assert (tmp_path / "water_inj_rate_sensitivity.png").exists()
 
 
 def test_water_inj_summary_reports_failures_and_missing_coverage(tmp_path) -> None:
     cfg = inj_cfg(
         out_dir=str(tmp_path),
         n_realizations=3,
-        water_inj_rate_values=(0.0, 300.0),
-        water_inj_bhp_values=(250.0,),
+        rate_values=(0.0, 300.0),
+        bhp_values=(250.0,),
     )
     results = pd.DataFrame(
         {
@@ -201,9 +223,9 @@ def test_water_inj_summary_reports_failures_and_missing_coverage(tmp_path) -> No
         }
     )
 
-    mbal._summarize_water_inj(results, cfg)
+    mbal._summarize_sweeps(results, cfg)
 
-    summary = pd.read_csv(tmp_path / "water_inj_sensitivity.csv")
+    summary = pd.read_csv(tmp_path / "water_inj_rate_sensitivity.csv")
     baseline = summary.loc[summary["water_inj_rate"] == 0.0].iloc[0]
     higher_rate = summary.loc[summary["water_inj_rate"] == 300.0].iloc[0]
     assert baseline["n_expected"] == 3
@@ -224,8 +246,8 @@ def test_water_inj_summary_reports_a_completely_missing_setting(tmp_path) -> Non
     cfg = inj_cfg(
         out_dir=str(tmp_path),
         n_realizations=3,
-        water_inj_rate_values=(0.0, 300.0),
-        water_inj_bhp_values=(250.0,),
+        rate_values=(0.0, 300.0),
+        bhp_values=(250.0,),
     )
     results = pd.DataFrame(
         {
@@ -238,9 +260,9 @@ def test_water_inj_summary_reports_a_completely_missing_setting(tmp_path) -> Non
         }
     )
 
-    mbal._summarize_water_inj(results, cfg)
+    mbal._summarize_sweeps(results, cfg)
 
-    summary = pd.read_csv(tmp_path / "water_inj_sensitivity.csv")
+    summary = pd.read_csv(tmp_path / "water_inj_rate_sensitivity.csv")
     missing_setting = summary.loc[summary["water_inj_rate"] == 300.0].iloc[0]
     assert len(summary) == 2
     assert missing_setting["n_rows"] == 0
@@ -254,9 +276,9 @@ def test_water_inj_summary_does_not_pool_gas_lift_settings(tmp_path) -> None:
     cfg = inj_cfg(
         out_dir=str(tmp_path),
         n_realizations=2,
-        gas_lift_values=(0.0, 1.0),
-        water_inj_rate_values=(0.0, 100.0),
-        water_inj_bhp_values=(),
+        lift_values=(0.0, 1.0),
+        rate_values=(0.0, 100.0),
+        bhp_values=(),
     )
     results = pd.DataFrame(
         {
@@ -269,9 +291,9 @@ def test_water_inj_summary_does_not_pool_gas_lift_settings(tmp_path) -> None:
         }
     )
 
-    mbal._summarize_water_inj(results, cfg)
+    mbal._summarize_sweeps(results, cfg)
 
-    summary = pd.read_csv(tmp_path / "water_inj_sensitivity.csv")
+    summary = pd.read_csv(tmp_path / "water_inj_rate_sensitivity.csv")
     assert len(summary) == 4
     higher_rate_with_lift = summary.loc[
         (summary["water_inj_rate"] == 100.0)
@@ -294,51 +316,73 @@ def test_water_inj_summary_handles_an_empty_results_table(tmp_path) -> None:
         ]
     )
 
-    mbal._summarize_water_inj(results, cfg)
+    mbal._summarize_sweeps(results, cfg)
 
-    assert not (tmp_path / "water_inj_sensitivity.csv").exists()
+    assert not (tmp_path / "water_inj_rate_sensitivity.csv").exists()
 
 
-def test_yaml_water_inj_config(tmp_path) -> None:
+def test_yaml_controls_round_trip(tmp_path) -> None:
     path = tmp_path / "wi.yaml"
     assert mbal.main(["--write-example-config", str(path)]) == 0
     cfg = mbal.load_config_yaml(path, base=mbal.default_config())
     mbal.validate_config(cfg)
     assert cfg.tag_mode == "name"
-    assert cfg.water_inj_rate_values == ()
-    assert cfg.water_inj_bhp_values == ()
-    samples = mbal.build_sample_table(
-        replace(
-            cfg,
-            n_realizations=3,
-            gas_lift_values=(),
-            water_inj_rate_values=(0.0, 100.0),
-            water_inj_bhp_values=(250.0,),
-        )
+    assert cfg.controls == ()
+
+    swept_cfg = replace(
+        cfg,
+        n_realizations=3,
+        controls=(
+            swept("water_inj_rate", RATE_TAG, (0.0, 100.0)),
+            swept("water_inj_bhp", BHP_TAG, (250.0,)),
+        ),
     )
-    assert len(samples) == 6
+    assert len(mbal.build_sample_table(swept_cfg)) == 6
 
 
-def test_dry_run_cli(tmp_path) -> None:
+def test_dry_run_cli_sweeps_a_configured_control(tmp_path) -> None:
+    config = tmp_path / "case.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "mbal_file": r"C:\Work\model.mbi",
+                "controls": [
+                    {"name": "water_inj_rate", "tag": RATE_TAG, "value": 0.0}
+                ],
+                "tanks": [
+                    {
+                        "key": "A",
+                        "name": "TANK_A",
+                        "index": 0,
+                        "result_index": 1,
+                        "official_stoiip": 4.5,
+                        "p90_stoiip": 3.5,
+                        "p10_stoiip": 5.5,
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
     out = tmp_path / "out"
+
     code = mbal.main(
         [
-            "--dry-run",
-            "--n",
-            "6",
-            "--seed",
-            "2",
-            "--out-dir",
-            str(out),
-            "--water-inj-rate-values",
-            "0,200",
-            "--water-inj-bhp-values",
-            "270",
+            "--config", str(config),
+            "--dry-run", "--n", "6", "--seed", "2",
+            "--out-dir", str(out),
+            "--control", "water_inj_rate=0,200",
         ]
     )
+
     assert code == 0
     samples = pd.read_csv(out / "samples_dry_run.csv")
     assert len(samples) == 12
     assert set(samples["water_inj_rate"]) == {0.0, 200.0}
-    assert set(samples["water_inj_bhp"]) == {270.0}
     assert (out / "summary_percentiles.csv").exists()
+
+
+def test_unknown_control_on_the_cli_is_rejected(tmp_path) -> None:
+    with pytest.raises(SystemExit, match="unknown control"):
+        mbal.main(["--dry-run", "--n", "2", "--control", "nope=1,2"])

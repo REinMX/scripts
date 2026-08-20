@@ -38,6 +38,13 @@ def tank(
     )
 
 
+LIFT_TAG = "MBAL.MB[0].PREDINP.CONSTRAINT[1].MAX_GASLIFT"
+
+
+def lift(values: tuple[float, ...]) -> tuple[mbal.Control, ...]:
+    return (mbal.Control(name="gas_lift_rate", tag=LIFT_TAG, values=values),)
+
+
 def name_cfg(**kwargs) -> mbal.Config:
     """Name-based tags for gas-lift/OpenServer plumbing tests."""
     base = replace(
@@ -62,7 +69,7 @@ def test_gas_lift_sweep_reuses_each_probabilistic_realization() -> None:
         n_realizations=12,
         seed=7,
         sampling="lhs",
-        gas_lift_values=(0.0, 0.5, 1.0),
+        controls=lift((0.0, 0.5, 1.0)),
     )
 
     samples = mbal.build_sample_table(cfg)
@@ -91,9 +98,7 @@ def test_apply_realization_uses_verified_name_based_input_tags() -> None:
             tank("bottom", "BOTTOM_TANK", 0, 20.0, fixed(100.0)),
             tank("top", "TOP_TANK", 1, 40.0),
         ),
-        gas_lift_well="LIFTED_WELL",
-        gas_lift_prediction_index=1,
-        gas_lift_values=(0.5,),
+        controls=lift((0.5,)),
     )
     row = pd.Series(
         {
@@ -115,15 +120,17 @@ def test_apply_realization_uses_verified_name_based_input_tags() -> None:
     ]
 
 
-def test_negative_gas_lift_value_is_rejected() -> None:
-    cfg = name_cfg(gas_lift_values=(0.0, -0.5))
+def test_a_control_tag_must_not_be_empty() -> None:
+    cfg = name_cfg(
+        controls=(mbal.Control(name="gas_lift_rate", tag="  ", values=(0.0, 1.0)),)
+    )
 
-    with pytest.raises(ValueError, match="gas-lift sensitivity values"):
+    with pytest.raises(ValueError, match="tag must not be empty"):
         mbal.validate_config(cfg)
 
 
 def test_gas_lift_summary_reports_field_oil_percentiles(tmp_path) -> None:
-    cfg = name_cfg(out_dir=str(tmp_path), gas_lift_values=(0.0, 1.0))
+    cfg = name_cfg(out_dir=str(tmp_path), controls=lift((0.0, 1.0)))
     results = pd.DataFrame(
         {
             "gas_lift_rate": [0.0, 0.0, 1.0, 1.0],
@@ -132,20 +139,20 @@ def test_gas_lift_summary_reports_field_oil_percentiles(tmp_path) -> None:
         }
     )
 
-    core._summarize_gas_lift(results, cfg)
+    core._summarize_sweeps(results, cfg)
 
-    summary = pd.read_csv(tmp_path / "gas_lift_sensitivity.csv")
+    summary = pd.read_csv(tmp_path / "gas_lift_rate_sensitivity.csv")
     assert summary["gas_lift_rate"].tolist() == [0.0, 1.0]
     np.testing.assert_allclose(summary["P50"], [15.0, 40.0])
     np.testing.assert_allclose(summary["mean"], [15.0, 40.0])
-    assert (tmp_path / "gas_lift_sensitivity.png").exists()
+    assert (tmp_path / "gas_lift_rate_sensitivity.png").exists()
 
 
 def test_gas_lift_summary_reports_paired_incremental_oil(tmp_path) -> None:
     cfg = name_cfg(
         out_dir=str(tmp_path),
         n_realizations=3,
-        gas_lift_values=(0.0, 1.0),
+        controls=lift((0.0, 1.0)),
     )
     results = pd.DataFrame(
         {
@@ -157,9 +164,9 @@ def test_gas_lift_summary_reports_paired_incremental_oil(tmp_path) -> None:
         }
     )
 
-    core._summarize_gas_lift(results, cfg)
+    core._summarize_sweeps(results, cfg)
 
-    summary = pd.read_csv(tmp_path / "gas_lift_sensitivity.csv")
+    summary = pd.read_csv(tmp_path / "gas_lift_rate_sensitivity.csv")
     baseline = summary.loc[summary["gas_lift_rate"] == 0.0].iloc[0]
     higher_lift = summary.loc[summary["gas_lift_rate"] == 1.0].iloc[0]
     assert baseline["reference_gas_lift_rate"] == pytest.approx(0.0)
@@ -174,8 +181,14 @@ def test_gas_lift_summary_does_not_pool_water_injection_settings(tmp_path) -> No
     cfg = name_cfg(
         out_dir=str(tmp_path),
         n_realizations=2,
-        gas_lift_values=(0.0, 1.0),
-        water_inj_rate_values=(0.0, 100.0),
+        controls=(
+            *lift((0.0, 1.0)),
+            mbal.Control(
+                name="water_inj_rate",
+                tag="MBAL.MB[0].PREDINP.CONSTRAINT[1].MAXINJWATRATE",
+                values=(0.0, 100.0),
+            ),
+        ),
     )
     results = pd.DataFrame(
         {
@@ -188,9 +201,9 @@ def test_gas_lift_summary_does_not_pool_water_injection_settings(tmp_path) -> No
         }
     )
 
-    core._summarize_gas_lift(results, cfg)
+    core._summarize_sweeps(results, cfg)
 
-    summary = pd.read_csv(tmp_path / "gas_lift_sensitivity.csv")
+    summary = pd.read_csv(tmp_path / "gas_lift_rate_sensitivity.csv")
     assert len(summary) == 4
     higher_lift_with_injection = summary.loc[
         (summary["gas_lift_rate"] == 1.0)
@@ -201,7 +214,7 @@ def test_gas_lift_summary_does_not_pool_water_injection_settings(tmp_path) -> No
 
 
 def test_main_summary_does_not_pool_results_across_gas_lift_rates(tmp_path) -> None:
-    cfg = name_cfg(out_dir=str(tmp_path), gas_lift_values=(0.0, 1.0))
+    cfg = name_cfg(out_dir=str(tmp_path), controls=lift((0.0, 1.0)))
     results = pd.DataFrame(
         {
             "realization": [0, 1, 2, 3],
@@ -241,19 +254,7 @@ def test_yaml_gas_lift_config(tmp_path) -> None:
         replace(
             cfg,
             n_realizations=4,
-            gas_lift_values=(0.0, 1.0),
-            water_inj_rate_values=(),
-            water_inj_bhp_values=(),
+            controls=lift((0.0, 1.0)),
         )
     )
     assert len(samples) == 8
-
-
-def test_legacy_script_modules_reexport_the_shared_api() -> None:
-    import probabilistic_mbal_openserver as legacy
-    import probabilistic_mbal_openserver_gas_lift as legacy_gas_lift
-
-    assert legacy.Config is core.Config
-    assert legacy_gas_lift.Config is core.Config
-    assert callable(legacy.main)
-    assert callable(legacy_gas_lift.main)

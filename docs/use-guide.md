@@ -1,9 +1,9 @@
-# Use guide — three tanks, then prediction controls
+# Use guide
 
-Use a Windows machine with licensed MBAL and OpenServer for predictions. A dry
-run works anywhere and never opens MBAL.
+Predictions need a Windows machine with licensed MBAL and OpenServer. A dry run
+works anywhere and never opens MBAL.
 
-For backup, COM, and tag troubleshooting details, use
+For backup, COM, and tag troubleshooting, see
 [mbal-openserver-runbook.md](mbal-openserver-runbook.md).
 
 ## 1. Prepare MBAL once
@@ -11,11 +11,16 @@ For backup, COM, and tag troubleshooting details, use
 1. Open the corrected `.mbi` and save a backup.
 2. Confirm the prediction already runs manually. This script changes inputs and
    calls `MBAL.MB.RunPrediction`; it does not build the prediction.
-3. Confirm all three tank names and their `TRES[2]` result sheets. Sheet 0 is
-   commonly consolidated; tank sheets normally start at 1.
-4. Copy any version-specific input/result strings with Ctrl+Right-click. The
-   built-in tags are defaults; add only the overrides you need under `tags:`.
+3. Confirm every tank name and its `TRES[2]` result sheet. Sheet 0 is commonly
+   consolidated; tank sheets normally start at 1.
+4. Copy every control tag, and any version-specific override, with
+   Ctrl+Right-click. Do not guess access strings.
 5. Do not edit the model in the GUI while OpenServer is running it.
+
+**Leave MBAL open.** OpenServer attaches to a running MBAL and cannot start
+one. Open it once, clear any startup dialog, and leave it running between
+runs. The runner no longer shuts MBAL down; set `close_mbal_on_finish: true`
+if you want the old behaviour.
 
 First-time Python setup:
 
@@ -31,127 +36,142 @@ pip install pywin32
 ```powershell
 Copy-Item .\example.yaml .\mbal_config.local.yaml
 git check-ignore -v -- .\mbal_config.local.yaml
+python mbal.py --config .\mbal_config.local.yaml --validate-config
 ```
 
-Set the model path and the exact three tank names. For each tank:
+## 3. Volumes
+
+Each tank needs `official_stoiip`. `p90_stoiip` and `p10_stoiip` are optional
+but must be given together.
 
 ```yaml
 - key: A
   name: <exact MBAL tank name>
   index: 0
   result_index: 1
-  p90_stoiip: 3.5       # optional, but P90/P10 are a pair
-  official_stoiip: 4.5  # fixed value, or the mean and P50 when P90/P10 exist
+  p90_stoiip: 3.5       # optional, paired with p10_stoiip
+  official_stoiip: 4.5  # the P50
   p10_stoiip: 5.5
 ```
 
-Omit both percentile fields for a fixed official volume. Do not add
-connectivity, communication groups, volume scales, residual multipliers, or
-base/upside roles; those keys are not part of this implementation.
+Add `in_model: false` to drop a tank entirely: it is not sampled, not written
+to MBAL, and not counted in `stoiip_total`. Unknown keys inside a tank block
+are rejected, so a misspelled `p90_stoiip` fails instead of silently turning
+the tank into a fixed volume.
 
-Validate before sampling:
+### What the prior does
 
-```text
-python mbal.py --config mbal_config.local.yaml --validate-config
-```
-
-## 3. Volume dry run
+`official_stoiip` is the **P50**. With P90 and P10 supplied, a split lognormal
+calibrates the lower and upper log-space widths separately:
 
 ```text
-python mbal.py --config mbal_config.local.yaml --dry-run --n 200
+sigma_low  = ln(official / P90) / 1.2816
+sigma_high = ln(P10 / official) / 1.2816
 ```
 
-Check:
+All three entered values are reproduced exactly, and asymmetric ranges keep
+their skew. Validation requires `0 < P90 < official < P10`.
 
-- exactly 200 base realizations when all control lists are empty;
-- one `stoiip_<key>` column per tank;
-- `stoiip_total` equals the row-wise tank sum;
-- fixed tanks equal `official_stoiip` in every row;
-- probabilistic tanks reproduce official as the mean and P50, and reproduce the
-  entered P90/P10 when those are symmetric about official;
-- tanks with no P90/P10 show P90 = P50 = P10 = mean, which is expected;
-- `summary_percentiles.csv` shows the official value beside each distribution.
+The **mean** is reported next to official. On a symmetric range they match; on
+a right-skewed range the mean sits above official, and that gap is the skew,
+not an error:
 
-## 4. Licensed producer prediction
+| entered P90 / official / P10 | sampled P90 | P50 | P10 | mean |
+|---|---|---|---|---|
+| 3.5 / 4.5 / 5.5 | 3.50 | 4.50 | 5.50 | 4.50 |
+| 3.5 / 4.5 / 6.5 | 3.50 | 4.50 | 6.50 | 4.81 |
 
-Keep control lists empty:
+official cannot be both the P50 and the mean unless the range is symmetric —
+a distribution whose mean equals its median is symmetric by definition.
+
+A tank with no P90/P10 is **fixed** at official in every realization. Its P90,
+P50, P10 and mean are then all equal, and so is any prediction result driven
+only by that tank. The volume table names these tanks so the flat percentiles
+are never a mystery.
+
+Tanks are sampled independently, one LHS or Monte Carlo dimension each. Field
+STOIIP is the row-wise sum, and field percentiles come from that summed column
+— never add tank percentiles, because percentiles of a sum are not the sum of
+percentiles.
+
+O&G convention throughout: P90 is the low case (10th statistical percentile),
+P10 the high case (90th).
+
+## 4. Controls
+
+`controls:` is every MBAL input written before each prediction. Each entry has
+a name, a literal OpenServer tag, and either `value` (a constant, written
+unchanged every realization) or `values` (a list to sweep).
 
 ```yaml
-gas_lift_values: []
-water_inj_rate_values: []
-water_inj_bhp_values: []
+controls:
+  - name: gas_lift
+    tag: MBAL.MB[0].PREDINP.CONSTRAINT[1].MAX_GASLIFT
+    values: [0, 0.5, 1.0]
+
+  - name: water_inj_rate
+    tag: MBAL.MB[0].PREDINP.CONSTRAINT[1].MAXINJWATRATE
+    values: [0, 300, 600]
+
+  - name: water_inj_min_rate
+    tag: MBAL.MB[0].PREDINP.CONSTRAINT[1].MININJWATRATE
+    value: 0
+
+  - name: pred_watinj
+    tag: MBAL.MB[0].PREDINP.WATINJ
+    value: "YES"
 ```
 
-Run a smoke check, then one realization, then the campaign:
+There is no built-in knowledge of what a control means — the tag you paste is
+written verbatim. MBAL's own semantics are yours to express: pinning both
+`MININJWATRATE` and `MAXINJWATRATE` gives a fixed rate, `PERFORMTYPE: "CFBHP"`
+with `CONSTFBHP` gives fixed-BHP control, and a rate plus `MAXFBHP` gives a
+rate target with a BHP limit. Anything else with an access string works the
+same way.
+
+Every swept control multiplies the row count: `n_realizations × values × ...`.
+Each one is paired against the same volume realizations, and each gets its own
+`<name>_sensitivity.csv`. Override a sweep from the command line without
+editing the YAML:
 
 ```text
-python mbal.py --config mbal_config.local.yaml --check-openserver
-python mbal.py --config mbal_config.local.yaml --n 1
-python mbal.py --config mbal_config.local.yaml --n 200
+python mbal.py --config mbal_config.local.yaml --control gas_lift=0,1,2
 ```
 
-Review the results CSV for `np_*`, `pres_*`, and `rf_*` per tank and for the
-field total.
+## 5. Run
 
-## 5. Gas-lift sweep
-
-Use rates in the model units:
-
-```yaml
-gas_lift_values: [0, 0.5, 1.0]
+```text
+python mbal.py --config mbal_config.local.yaml --validate-config   # static check
+python mbal.py --config mbal_config.local.yaml --dry-run --n 200   # volumes only
+python mbal.py --config mbal_config.local.yaml --check-openserver  # COM + tags
+python mbal.py --config mbal_config.local.yaml --n 1               # one realization
+python mbal.py --config mbal_config.local.yaml --n 200             # campaign
 ```
 
-The default control is
-`PREDINP.CONSTRAINT[{p}].MAX_GASLIFT`; verify `{p}` in MBAL. Every volume
-realization is repeated at every lift rate. Read `gas_lift_sensitivity.csv` and
-`.png`, not pooled production percentiles. The CSV also reports paired
-incremental oil relative to the lowest lift rate for the same volume
-realization and any other fixed control settings.
+On the dry run, check that `stoiip_total` is the row-wise tank sum, that fixed
+tanks equal `official_stoiip` in every row, and that probabilistic tanks
+reproduce the entered P90/P50/P10.
 
-## 6. Water-injection sweep
+## 6. Sensitivity output
 
-Set the injector name if the chosen tags use `{well}`, then choose one control:
+Each `<name>_sensitivity.csv` compares every setting of that control against
+its lowest value, holding all other controls fixed, and reports:
 
-- `rate`: minimum and maximum rate are set to the same value;
-- `bhp`: fixed FBHP with `PERFORMTYPE=CFBHP`;
-- `rate_with_bhp_limit`: target rate plus maximum FBHP.
-
-Example:
-
-```yaml
-water_inj_well: <exact injector name>
-water_inj_control: rate_with_bhp_limit
-water_inj_rate_values: [0, 300, 600]
-water_inj_bhp_values: [250, 300]
-```
-
-Row count is `n_realizations × rates × BHPs`. Start with a small dry run. Read
-`water_inj_sensitivity.csv` and `.png` for field oil by control setting. Paired
-increments use the lowest swept rate, or the lowest BHP when BHP is the only
-water control, as the reference while holding the other controls fixed.
-
-Both sensitivity CSVs include:
-
-- absolute Np P90/P50/P10 for each complete control setting;
-- `delta_P90`, `delta_P50`, and `delta_P10` from paired realizations;
+- absolute Np P90/P50/P10 for each complete setting;
+- `delta_P90`, `delta_P50`, `delta_P10` from paired realizations;
 - `probability_delta_positive` and `n_paired`;
-- `n_expected`, `n_rows`, `n_ok`, `n_failed`, `n_missing`, and
-  `success_fraction`.
+- `n_expected`, `n_rows`, `n_ok`, `n_failed`, `n_missing`, `success_fraction`.
 
 Do not compare settings with unexplained failures or missing realizations.
-When three control axes are active together, the complete Cartesian results
-remain in the CSV, but the two-dimensional sensitivity plot is skipped.
+With three or more swept controls the full Cartesian results stay in the CSV
+but the two-dimensional plot is skipped.
 
 ## 7. Resume and summarize
 
-Restart with the same YAML, seed, and output directory:
-
-```text
-python mbal.py --config mbal_config.local.yaml
-```
-
-Rows with `status == ok` are skipped; failed rows are retried. Resume refuses a
-CSV whose stored inputs differ from the regenerated sample table.
+Restart with the same YAML, seed, and output directory. Rows with
+`status == ok` are skipped and failed rows retried. Resume refuses a CSV whose
+stored inputs differ from the regenerated sample table, so a changed seed or
+prior cannot be resumed silently.
 
 Rebuild summaries without opening MBAL:
 
@@ -166,6 +186,6 @@ python mbal.py --config mbal_config.local.yaml --summarize-only
 | `samples_dry_run.csv` | Sampled volumes and control grid |
 | `summary_percentiles.csv` | Official, P90/P50/P10, mean, std for tank/field STOIIP |
 | `mbal_results.csv` | Resume-safe row-level prediction results |
-| `gas_lift_sensitivity.csv` | Absolute and paired incremental field Np by lift rate |
-| `water_inj_sensitivity.csv` | Absolute and paired incremental field Np by injector rate/BHP |
+| `<name>_sensitivity.csv` | Absolute and paired incremental field Np per swept control |
+| `run_metadata.csv` | Seed, sampling method, swept controls, success counts |
 | `mbal_run.log` | Errors, retries, and ETA |
